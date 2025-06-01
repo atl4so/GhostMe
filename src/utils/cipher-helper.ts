@@ -107,7 +107,7 @@ export class CipherHelper {
     try {
       // Parse the message manually
       const { nonce, ephemeralPublicKey, ciphertext } = CipherHelper.parseMessageComponents(encryptedHex);
-      
+
       // Create message using the constructor provided by the WASM module
       const encryptedMessage = new EncryptedMessage(encryptedHex);
       const privateKey = new PrivateKey(privateKeyHex);
