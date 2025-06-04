@@ -10,7 +10,7 @@ type Step = {
   type: "home" | "create" | "import" | "unlock" | "finalizing";
   mnemonic?: Mnemonic;
   name?: string;
-};
+    };
 
 type WalletGuardProps = {
   onSuccess: () => void;
@@ -121,27 +121,27 @@ export const WalletGuard = ({ onSuccess, selectedNetwork, onNetworkChange, isCon
         <NetworkSelector
           selectedNetwork={selectedNetwork}
           onNetworkChange={onNetworkChange}
-          isConnected={isConnected && selectedNetwork !== "mainnet"}
+          isConnected={isConnected}
         />
         <h2>Select Wallet</h2>
-        <div className="wallet-list">
-          {wallets.map((wallet) => (
-            <div key={wallet.id} className="wallet-item">
-              <div className="wallet-info">
+          <div className="wallet-list">
+            {wallets.map((wallet) => (
+              <div key={wallet.id} className="wallet-item">
+                <div className="wallet-info">
                 <div className="wallet-name">{wallet.name}</div>
                 <div className="wallet-created">Created: {new Date(wallet.createdAt).toLocaleDateString()}</div>
-              </div>
-              <div className="wallet-actions">
+                </div>
+                <div className="wallet-actions">
                 <button onClick={() => onSelectWallet(wallet)} className="select-button">
                   Select
                 </button>
                 <button onClick={() => onDeleteWallet(wallet.id)} className="delete-button">
                   Delete
                 </button>
+                </div>
               </div>
-            </div>
-          ))}
-        </div>
+            ))}
+          </div>
         <div className="wallet-options">
           <button onClick={() => onClickStep("create")} className="create-wallet-button">
             Create New Wallet

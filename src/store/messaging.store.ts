@@ -34,6 +34,8 @@ interface MessagingState {
   setOpenedRecipient: (contact: string | null) => void;
   refreshMessagesOnOpenedRecipient: () => void;
   setIsCreatingNewChat: (isCreatingNewChat: boolean) => void;
+
+  connectAccountService: (accountService: any) => void;
 }
 
 export const useMessagingStore = create<MessagingState>((set, g) => ({
@@ -77,6 +79,7 @@ export const useMessagingStore = create<MessagingState>((set, g) => ({
 
     const contacts = new Map();
 
+    // Process messages and organize by conversation
     messages[address]?.forEach((msg) => {
       // Ensure fileData is properly loaded if it exists
       if (msg.fileData) {
@@ -95,17 +98,34 @@ export const useMessagingStore = create<MessagingState>((set, g) => ({
           messages: [],
         });
       }
-      contacts.get(otherParty).messages.push(msg);
+
+      const contact = contacts.get(otherParty);
+      contact.messages.push(msg);
+      
+      // Update last message if this message is more recent
+      if (msg.timestamp > contact.lastMessage.timestamp) {
+        contact.lastMessage = msg;
+      }
     });
 
+    // Sort messages within each contact by timestamp
+    contacts.forEach(contact => {
+      contact.messages.sort((a: Message, b: Message) => a.timestamp - b.timestamp);
+    });
+
+    // Update state with sorted contacts and messages
+    const sortedContacts = [...contacts.values()].sort(
+      (a, b) => b.lastMessage.timestamp - a.lastMessage.timestamp
+    );
+
     set({
-      contacts: [...contacts.values()].sort(
-        (a, b) => b.lastMessage.timestamp - a.lastMessage.timestamp
-      ),
+      contacts: sortedContacts,
       messages: (messages[address] || []).sort(
         (a: Message, b: Message) => a.timestamp - b.timestamp
       ),
     });
+
+    // Refresh the currently opened conversation
     g().refreshMessagesOnOpenedRecipient();
 
     return g().messages;
@@ -133,7 +153,10 @@ export const useMessagingStore = create<MessagingState>((set, g) => ({
         // Use the earliest timestamp if both exist
         timestamp: Math.min(message.timestamp, existingMessage.timestamp),
         // Preserve fileData if it exists in either message
-        fileData: message.fileData || existingMessage.fileData
+        fileData: message.fileData || existingMessage.fileData,
+        // Ensure we have both addresses
+        senderAddress: message.senderAddress || existingMessage.senderAddress,
+        recipientAddress: message.recipientAddress || existingMessage.recipientAddress
       };
       messagesMap[walletAddress][existingMessageIndex] = mergedMessage;
     } else {
@@ -155,13 +178,46 @@ export const useMessagingStore = create<MessagingState>((set, g) => ({
         }
       }
       // Add new message
-    messagesMap[walletAddress].push(message);
+      messagesMap[walletAddress].push(message);
     }
 
     localStorage.setItem(
       "kaspa_messages_by_wallet",
       JSON.stringify(messagesMap)
     );
+
+    // Update contacts and conversations
+    const state = g();
+    const otherParty = message.senderAddress === walletAddress ? 
+      message.recipientAddress : message.senderAddress;
+
+    // Update or create contact
+    const existingContactIndex = state.contacts.findIndex(c => c.address === otherParty);
+    if (existingContactIndex !== -1) {
+      // Update existing contact
+      const updatedContact = {
+        ...state.contacts[existingContactIndex],
+        lastMessage: message,
+        messages: [...state.contacts[existingContactIndex].messages, message]
+      };
+      const newContacts = [...state.contacts];
+      newContacts[existingContactIndex] = updatedContact;
+      set({ contacts: newContacts });
+    } else {
+      // Create new contact
+      const newContact = {
+        address: otherParty,
+        lastMessage: message,
+        messages: [message]
+      };
+      set({ contacts: [...state.contacts, newContact] });
+    }
+
+    // Sort contacts by most recent message
+    const sortedContacts = [...g().contacts].sort(
+      (a, b) => b.lastMessage.timestamp - a.lastMessage.timestamp
+    );
+    set({ contacts: sortedContacts });
   },
   setIsLoaded: (isLoaded) => {
     set({ isLoaded });
@@ -343,5 +399,40 @@ export const useMessagingStore = create<MessagingState>((set, g) => ({
       }
       throw new Error("Failed to import messages: Unknown error");
     }
+  },
+  connectAccountService: (accountService) => {
+    // Make the store available globally for the account service
+    (window as any).messagingStore = g();
+    
+    // Listen for new messages from the account service
+    accountService.on("messageReceived", (message: Message) => {
+      const state = g();
+      
+      // Store the message
+      state.storeMessage(message, message.senderAddress);
+      
+      // Add the message to our state
+      state.addMessages([message]);
+      
+      // Refresh the UI if this message is for the currently opened chat
+      if (state.openedRecipient === message.senderAddress || 
+          state.openedRecipient === message.recipientAddress) {
+        state.refreshMessagesOnOpenedRecipient();
+      }
+      
+      // Update contacts if needed
+      const otherParty = message.senderAddress === state.openedRecipient 
+        ? message.recipientAddress 
+        : message.senderAddress;
+        
+      const existingContact = state.contacts.find(c => c.address === otherParty);
+      if (!existingContact) {
+        state.addContacts([{
+          address: otherParty,
+          lastMessage: message,
+          messages: [message]
+        }]);
+      }
+    });
   },
 }));

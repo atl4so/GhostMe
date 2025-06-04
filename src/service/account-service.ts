@@ -14,11 +14,33 @@ import {
   Balance,
   UtxoEntry,
   IUtxosChanged,
+  IBlockAdded,
+  ITransaction,
+  NetworkType,
 } from "kaspa-wasm";
-import { KaspaClient } from "../utils/all-in-one";
+import { KaspaClient, decodePayload } from "../utils/all-in-one";
 import { UnlockedWallet, WalletStorage } from "../utils/wallet-storage";
 import EventEmitter from "eventemitter3";
 import { encrypt_message } from "cipher";
+import { CipherHelper } from "../utils/cipher-helper";
+
+// Message related types
+type DecodedMessage = {
+  transactionId: string;
+  senderAddress: string;
+  recipientAddress: string;
+  timestamp: number;
+  content: string;
+  amount: number;
+  payload: string;
+  fileData?: {
+    type: string;
+    name: string;
+    size: number;
+    mimeType: string;
+    content: string;
+  };
+};
 
 // strictly typed events
 type AccountServiceEvents = {
@@ -31,6 +53,7 @@ type AccountServiceEvents = {
   }) => void;
   utxosChanged: (utxos: UtxoEntry[]) => void;
   transactionReceived: (transaction: any) => void;
+  messageReceived: (message: DecodedMessage) => void;
 };
 
 type CreateTransactionArgs = {
@@ -45,6 +68,13 @@ type SendMessageArgs = {
   password: string;
 };
 
+// Add this helper function at the top level
+function stringifyWithBigInt(obj: any): string {
+  return JSON.stringify(obj, (_, value) => 
+    typeof value === 'bigint' ? value.toString() : value
+  );
+}
+
 export class AccountService extends EventEmitter<AccountServiceEvents> {
   processor: UtxoProcessor;
   context: UtxoContext;
@@ -54,7 +84,13 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
   isStarted: boolean = false;
   receiveAddress: Address | null = null;
 
-  private historyOfEmittedTxIds: string[] = [];
+  private processedMessageIds: Set<string> = new Set();
+  private readonly MESSAGE_PREFIX_HEX = "636970685f6d73673a"; // "ciph_msg:" in hex
+  private readonly MAX_PROCESSED_MESSAGES = 1000; // Prevent unlimited growth
+  private readonly MESSAGE_AMOUNT = BigInt(10000000); // 0.1 KAS in sompi
+
+  // Add password field
+  private password: string | null = null;
 
   constructor(
     private readonly rpcClient: KaspaClient,
@@ -73,6 +109,27 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
       rpc: rpcClient.rpc,
     });
     this.context = new UtxoContext({ processor: this.processor });
+
+    // Set password from unlocked wallet if available
+    if (unlockedWallet.password) {
+      this.password = unlockedWallet.password;
+    }
+  }
+
+  // Add method to set password
+  public setPassword(password: string) {
+    if (!password) {
+      throw new Error("Password cannot be empty");
+    }
+    console.log("Setting password in AccountService");
+    this.password = password;
+  }
+
+  // Add method to check if password is set
+  private ensurePasswordSet() {
+    if (!this.password) {
+      throw new Error("Password not set - cannot perform operation");
+    }
   }
 
   private async _emitBalanceUpdate() {
@@ -142,6 +199,43 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
     return null;
   }
 
+  private async fetchHistoricalMessages() {
+    if (!this.receiveAddress) return;
+
+    try {
+      console.log("Fetching historical messages...");
+      const address = this.receiveAddress.toString();
+
+      // Use the network-appropriate API endpoint
+      const baseUrl = this.networkId === 'mainnet' ? 'https://api.kaspa.org' : 'https://api-tn10.kaspa.org';
+      const response = await fetch(`${baseUrl}/addresses/${address}/transactions`);
+      
+      if (!response.ok) {
+        throw new Error(`Failed to fetch historical transactions: ${response.statusText}`);
+      }
+
+      const data = await response.json();
+      const transactions = data.transactions || [];
+
+      console.log(`Found ${transactions.length} historical transactions`);
+
+      // Process each transaction
+      for (const tx of transactions) {
+        const txId = tx.transactionId;
+        if (!txId || this.processedMessageIds.has(txId)) continue;
+
+        // Check if this is a message transaction and involves our address
+        if (this.isMessageTransaction(tx) && this.isTransactionForUs(tx)) {
+          await this.processMessageTransaction(tx, txId, Number(tx.blockTime));
+        }
+      }
+
+      console.log("Historical message fetch complete");
+    } catch (error) {
+      console.error("Error fetching historical messages:", error);
+    }
+  }
+
   private async _onUtxoChanged(notification: IUtxosChanged) {
     console.log("Processing UTXO change:", notification);
 
@@ -171,35 +265,6 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
       totalAmount: totalKAS
     });
     this.emit("utxosChanged", utxos);
-
-    // Fetch transaction details for new UTXOs with a 3-second delay
-    if (notification.data.added) {
-      console.log("Waiting 3 seconds before fetching transaction details...");
-      await new Promise(resolve => setTimeout(resolve, 3000));
-      
-      for (const utxo of notification.data.added) {
-        if (utxo?.outpoint?.transactionId && !this.historyOfEmittedTxIds.includes(utxo.outpoint.transactionId)) {
-          const txDetails = await this._fetchTransactionDetails(utxo.outpoint.transactionId);
-          if (txDetails) {
-            console.log("New transaction details:", txDetails);
-            
-            // Only process if it's a message transaction
-            if (txDetails.payload && txDetails.payload.startsWith("636970685f6d73673a")) {
-              console.log("Found new message transaction, emitting event");
-              this.emit("transactionReceived", txDetails);
-              
-              // Add to history to prevent duplicate processing
-              this.historyOfEmittedTxIds.push(utxo.outpoint.transactionId);
-              
-              // Keep history size manageable
-              if (this.historyOfEmittedTxIds.length > 100) {
-                this.historyOfEmittedTxIds.shift();
-              }
-            }
-          }
-        }
-      }
-    }
   }
 
   async start() {
@@ -258,60 +323,47 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
       console.log("Starting address tracking for primary address...");
       await this.context.trackAddresses(addressesToTrack);
 
-      // Wait for the UTXO processor to process any initial UTXOs
-      await new Promise<void>((resolve) => {
-        const maxAttempts = 10;
-        let attempts = 0;
-        
-        const checkUtxos = async () => {
-          const matureUtxos = this.context.getMatureRange(0, this.context.matureLength);
-          const pendingUtxos = this.context.getPending();
-          const balance = await this.context.balance;
+      // Set up block subscription with optimized message handling
+      console.log("Setting up block subscription...");
+      await this.rpcClient.subscribeToBlockAdded(async (event) => {
+        try {
+          console.log("Processing block event:", stringifyWithBigInt(event));
           
-          console.log("Checking UTXO processor state:", {
-            matureUtxos: matureUtxos.length,
-            pendingUtxos: pendingUtxos.length,
-            hasBalance: !!balance,
-            mature: balance ? Number(balance.mature) / 100000000 : 0,
-            pending: balance ? Number(balance.pending) / 100000000 : 0
-          });
+          const blockTime = Number(event?.data?.block?.header?.timestamp) || Date.now();
+          const blockHash = event?.data?.block?.header?.hash;
+          
+          // Process transactions if they exist
+          const transactions = event?.data?.block?.transactions || [];
+          
+          for (const tx of transactions) {
+            const txId = tx.verboseData?.transactionId;
+            if (!txId) continue; // Skip if no transaction ID
+            
+            // Skip if we've already processed this message
+            if (this.processedMessageIds.has(txId)) {
+              continue;
+            }
 
-          if (
-            // Either we have UTXOs
-            matureUtxos.length > 0 || pendingUtxos.length > 0 ||
-            // Or we've confirmed there are none after a few attempts
-            attempts >= maxAttempts
-          ) {
-            console.log("UTXO processor initialization complete");
-            resolve();
-          } else {
-            attempts++;
-            console.log(`Waiting for UTXO processor (attempt ${attempts}/${maxAttempts})...`);
-            setTimeout(checkUtxos, 200);
+            // Check if this is a message transaction and involves our address
+            if (this.isMessageTransaction(tx) && this.isTransactionForUs(tx)) {
+              await this.processMessageTransaction(tx, blockHash || txId, blockTime);
+            }
           }
-        };
-        
-        checkUtxos();
+        } catch (error) {
+          console.error("Error processing block event:", error);
+        }
       });
+      console.log("Successfully subscribed to block events");
 
-      // Force an initial balance update
-      await this._emitBalanceUpdate();
-
-      // Set up RPC subscription for future UTXO changes
-      console.log("Setting up UTXO subscription...");
-      await this.rpcClient.subscribeToUtxoChanges(addressStrings, (notification) => {
-        console.log("UTXO change notification received:", notification);
-        this._onUtxoChanged(notification);
-      });
-      console.log("Successfully subscribed to UTXO changes");
+      // Fetch historical messages after setup is complete
+      await this.fetchHistoricalMessages();
 
       // Get initial state one more time to ensure we're up to date
       await this._emitBalanceUpdate();
 
       this.isStarted = true;
-      console.log("Account service initialization complete");
     } catch (error) {
-      console.error("Failed to initialize account service:", error);
+      console.error("Failed to start account service:", error);
       throw error;
     }
   }
@@ -466,29 +518,29 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
     try {
       const minimumAmount = kaspaToSompi("0.1");
 
-    if (!minimumAmount) {
-      throw new Error("Minimum amount missing");
-    }
+      if (!minimumAmount) {
+        throw new Error("Minimum amount missing");
+      }
 
       // Encrypt the message
-    const encryptedMessage = encrypt_message(
-      sendMessage.toAddress.toString(),
-      sendMessage.message
-    );
+      const encryptedMessage = encrypt_message(
+        sendMessage.toAddress.toString(),
+        sendMessage.message
+      );
 
-    const prefix = "ciph_msg:"
-      .split("")
-      .map((c) => c.charCodeAt(0).toString(16).padStart(2, "0"))
-      .join("");
+      const prefix = "ciph_msg:"
+        .split("")
+        .map((c) => c.charCodeAt(0).toString(16).padStart(2, "0"))
+        .join("");
 
       const payload = prefix + encryptedMessage.to_hex();
       
       // Use a direct approach, minimizing string operations on addresses
       return this.estimateTransactionDetails({
-      address: sendMessage.toAddress,
-      amount: minimumAmount,
+        address: sendMessage.toAddress,
+        amount: this.MESSAGE_AMOUNT,
         payload: payload,
-    });
+      });
     } catch (error) {
       console.error("Error in estimateSendMessage:", error);
       throw error;
@@ -496,11 +548,7 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
   }
 
   public async sendMessage(sendMessage: SendMessageArgs) {
-    const minimumAmount = kaspaToSompi("0.1");
-
-    if (!minimumAmount) {
-      throw new Error("Minimum amount missing");
-    }
+    this.ensurePasswordSet();
 
     const destinationAddress = this.ensureAddressPrefix(sendMessage.toAddress);
     
@@ -523,7 +571,7 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
     const txId = await this.createTransaction(
       {
         address: destinationAddress,
-        amount: minimumAmount,
+        amount: this.MESSAGE_AMOUNT,
         payload: payload,
       },
       sendMessage.password
@@ -573,12 +621,6 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
     preEncryptedHex: string, 
     password: string
   ) {
-    const minimumAmount = kaspaToSompi("0.1");
-
-    if (!minimumAmount) {
-      throw new Error("Minimum amount missing");
-    }
-    
     // Ensure the destination address has the proper prefix
     const destinationAddress = this.ensureAddressPrefix(toAddress);
     console.log("Sending pre-encrypted message to:", destinationAddress.toString());
@@ -599,7 +641,7 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
     return this.createTransaction(
       {
         address: destinationAddress,
-        amount: minimumAmount,
+        amount: this.MESSAGE_AMOUNT,
         payload: payload,
       },
       password
@@ -660,5 +702,304 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
       networkId: this.networkId,
       priorityFee: BigInt(0),
     });
+  }
+
+  private getOutputAddress(output: any): string | null {
+    return output?.scriptPublicKey?.verboseData?.scriptPublicKeyAddress ||
+           output?.verboseData?.scriptPublicKeyAddress ||
+           output?.scriptPublicKeyAddress ||
+           null;
+  }
+
+  private isMessageTransaction(tx: ITransaction): boolean {
+    return tx?.payload?.startsWith(this.MESSAGE_PREFIX_HEX) ?? false;
+  }
+
+  private async processMessageTransaction(tx: any, blockHash: string, blockTime: number) {
+    try {
+      const txId = tx.verboseData?.transactionId;
+      if (!txId || this.processedMessageIds.has(txId)) {
+        return; // Skip if no txId or already processed
+      }
+
+      // Log raw transaction for debugging
+      console.log("Processing message transaction:", {
+        txId,
+        hasInputs: !!tx.inputs?.length,
+        numInputs: tx.inputs?.length,
+        hasOutputs: !!tx.outputs?.length,
+        numOutputs: tx.outputs?.length,
+        payload: tx.payload?.substring(0, 50) + "..."
+      });
+
+      // Get sender and recipient from the transaction
+      let sender = "Unknown";
+      let recipient = "Unknown";
+      
+      if (tx.outputs && tx.outputs.length > 0) {
+        // Log all outputs for debugging
+        console.log("Transaction outputs:", tx.outputs.map((output: any) => ({
+          value: typeof output.value === 'bigint' ? output.value.toString() : output.value,
+          address: this.getOutputAddress(output),
+          hasScriptPubKey: !!output.scriptPublicKey,
+          hasVerboseData: !!output.scriptPublicKey?.verboseData
+        })));
+        
+        // First find the message output (0.1 KAS)
+        const messageOutput = tx.outputs.find((output: any) => {
+          const value = typeof output.value === 'bigint' ? output.value : BigInt(output.value || 0);
+          const isMessageOutput = value === this.MESSAGE_AMOUNT;
+          console.log("Checking output for message:", {
+            value: value.toString(),
+            messageAmount: this.MESSAGE_AMOUNT.toString(),
+            isMessageOutput,
+            address: this.getOutputAddress(output)
+          });
+          return isMessageOutput;
+        });
+
+        // Get recipient from message output
+        if (messageOutput) {
+          const messageAddress = this.getOutputAddress(messageOutput);
+          if (messageAddress) {
+            recipient = messageAddress;
+            console.log(`Found message recipient: ${recipient}`);
+          } else {
+            console.log("Could not find recipient address in message output:", messageOutput);
+          }
+        }
+
+        // Find change output (any output that's not the message output)
+        const changeOutput = tx.outputs.find((output: any) => {
+          const value = typeof output.value === 'bigint' ? output.value : BigInt(output.value || 0);
+          const address = this.getOutputAddress(output);
+          const isChangeOutput = value !== this.MESSAGE_AMOUNT && address && address !== recipient;
+          console.log("Checking output for change:", {
+            value: value.toString(),
+            address,
+            recipientAddress: recipient,
+            isChangeOutput
+          });
+          return isChangeOutput;
+        });
+
+        if (changeOutput) {
+          const changeAddress = this.getOutputAddress(changeOutput);
+          if (changeAddress) {
+            sender = changeAddress;
+            console.log(`Found sender from change output: ${sender}`);
+          } else {
+            console.log("Could not find sender address in change output:", changeOutput);
+          }
+        }
+
+        // If we couldn't get sender from change output, try inputs as fallback
+        if (sender === "Unknown" && tx.inputs && tx.inputs.length > 0) {
+          console.log("Trying to find sender from inputs:", tx.inputs.map((input: any) => ({
+            hasOutpoint: !!input.previousOutpoint,
+            outpointAddress: input.previousOutpoint?.verboseData?.scriptPublicKeyAddress,
+            verboseAddress: input.verboseData?.scriptPublicKeyAddress,
+            previousOutpointAddress: input.previous_outpoint_address,
+            rawInput: this.stringifyWithBigInt(input)
+          })));
+
+          const possibleSenderAddresses = tx.inputs
+            .map((input: any) => {
+              return [
+                input.previousOutpoint?.verboseData?.scriptPublicKeyAddress,
+                input.previousOutpoint?.scriptPublicKey?.verboseData?.scriptPublicKeyAddress,
+                input.verboseData?.scriptPublicKeyAddress,
+                input.scriptPublicKey?.verboseData?.scriptPublicKeyAddress,
+                input.previous_outpoint_address,
+                input.previousOutpoint?.address,
+                input.address
+              ].filter(Boolean);
+            })
+            .flat();
+
+          if (possibleSenderAddresses.length > 0) {
+            sender = possibleSenderAddresses[0];
+            console.log(`Found sender from input data: ${sender}`);
+          } else {
+            console.log("No sender addresses found in inputs:", this.stringifyWithBigInt(tx.inputs));
+          }
+        }
+      }
+
+      // Log final results
+      console.log("Message participants:", {
+        sender,
+        recipient,
+        myAddress: this.receiveAddress?.toString(),
+        txId,
+        isIncoming: recipient === this.receiveAddress?.toString(),
+        isOutgoing: sender === this.receiveAddress?.toString()
+      });
+
+      // Get amount from the message output
+      let amount = 0;
+      const messageOutput = tx.outputs?.find((o: any) => {
+        const value = typeof o.value === 'bigint' ? o.value : BigInt(o.value || 0);
+        return value === this.MESSAGE_AMOUNT;
+      });
+      if (messageOutput) {
+        amount = Number(messageOutput.value) / 100000000;
+      }
+
+      // Check if this is a cipher message
+      if (!tx.payload?.startsWith(this.MESSAGE_PREFIX_HEX)) {
+        console.log(`Skipping transaction ${txId} - not a cipher message`);
+        return;
+      }
+
+      // Ensure password is set before attempting decryption
+      try {
+        this.ensurePasswordSet();
+      } catch (error: unknown) {
+        const errorMessage = error instanceof Error ? error.message : "Unknown error";
+        console.log(`Cannot decrypt message ${txId} - ${errorMessage}`);
+        return;
+      }
+
+      // Strip the prefix and get the encrypted hex
+      const encryptedHex = tx.payload.substring(this.MESSAGE_PREFIX_HEX.length);
+      
+      // Get private key for decryption
+      const privateKeyGenerator = WalletStorage.getPrivateKeyGenerator(
+        this.unlockedWallet,
+        this.password!
+      );
+      
+      let decryptedContent = "";
+      let decryptionSuccess = false;
+
+      // Try with receive key first
+      try {
+        const privateKey = privateKeyGenerator.receiveKey(0);
+        const result = await CipherHelper.tryDecrypt(encryptedHex, privateKey.toString(), txId);
+        decryptedContent = result;
+        decryptionSuccess = true;
+        console.log(`Successfully decrypted message with receive key`);
+      } catch (error) {
+        console.log(`Failed to decrypt with receive key:`, error);
+      }
+
+      // If not decrypted, try with change key
+      if (!decryptionSuccess) {
+        try {
+          const privateKey = privateKeyGenerator.changeKey(0);
+          const result = await CipherHelper.tryDecrypt(encryptedHex, privateKey.toString(), txId);
+          decryptedContent = result;
+          decryptionSuccess = true;
+          console.log(`Successfully decrypted message with change key`);
+        } catch (error) {
+          console.log(`Failed to decrypt with change key:`, error);
+        }
+      }
+
+      if (!decryptionSuccess) {
+        console.log(`Could not decrypt message for transaction ${txId}`);
+        return;
+      }
+
+      // Create message object that matches the UI's expected format
+      const message: DecodedMessage = {
+        transactionId: txId,
+        senderAddress: sender,
+        recipientAddress: recipient,
+        content: decryptedContent,
+        timestamp: blockTime,
+        amount,
+        payload: tx.payload
+      };
+
+      // Track this message
+      this.processedMessageIds.add(txId);
+      
+      // Prevent unlimited growth of processed messages set
+      if (this.processedMessageIds.size > this.MAX_PROCESSED_MESSAGES) {
+        const idsArray = Array.from(this.processedMessageIds);
+        this.processedMessageIds = new Set(idsArray.slice(-this.MAX_PROCESSED_MESSAGES));
+      }
+
+      // Store the message in local storage
+      if (this.receiveAddress) {
+        const messagingStore = (window as any).messagingStore;
+        if (messagingStore) {
+          const myAddress = this.receiveAddress.toString();
+          
+          // Determine the other party in the conversation
+          const otherParty = sender === myAddress ? recipient : sender;
+          
+          // Store message under both addresses to ensure proper conversation grouping
+          messagingStore.storeMessage(message, myAddress);
+          messagingStore.storeMessage(message, otherParty);
+          
+          // Reload messages to update the UI
+          messagingStore.loadMessages(myAddress);
+          
+          // Set the opened recipient to ensure the conversation stays focused
+          if (messagingStore.openedRecipient === null) {
+            messagingStore.setOpenedRecipient(otherParty);
+          }
+        }
+      }
+
+      // Emit the message event
+      console.log(`Received new message in transaction ${txId} from ${sender} to ${recipient}`);
+      this.emit("messageReceived", message);
+
+    } catch (error) {
+      console.error(`Error processing message transaction ${tx.verboseData?.transactionId}:`, error);
+    }
+  }
+
+  private isTransactionForUs(tx: ITransaction): boolean {
+    if (!this.receiveAddress) return false;
+    const ourAddress = this.receiveAddress.toString();
+    
+    // Check if this is a message transaction
+    const isMessageTx = this.isMessageTransaction(tx);
+    if (!isMessageTx) return false;
+
+    // For message transactions, check both outputs
+    
+    // Find message output and change output
+    let messageOutput = null;
+    let changeOutput = null;
+    
+    if (tx.outputs) {
+      for (const output of tx.outputs) {
+        const value = typeof output.value === 'bigint' ? output.value : BigInt(output.value || 0);
+        const address = this.getOutputAddress(output);
+        
+        if (value === this.MESSAGE_AMOUNT) {
+          messageOutput = output;
+        } else {
+          changeOutput = output;
+        }
+      }
+    }
+
+    // Get addresses from outputs
+    const messageAddress = messageOutput ? this.getOutputAddress(messageOutput) : null;
+    const changeAddress = changeOutput ? this.getOutputAddress(changeOutput) : null;
+
+    // We're involved if we're either the recipient (message output)
+    // or the sender (change output)
+    const isInvolved = messageAddress === ourAddress || changeAddress === ourAddress;
+    
+    if (isInvolved) {
+      console.log(`Transaction ${tx.verboseData?.transactionId} involves our address as ${messageAddress === ourAddress ? 'recipient' : 'sender'}`);
+    }
+    
+    return isInvolved;
+  }
+
+  // Add this helper method to the class
+  private stringifyWithBigInt(obj: any): string {
+    return JSON.stringify(obj, (_, value) => 
+      typeof value === 'bigint' ? value.toString() : value
+    );
   }
 }

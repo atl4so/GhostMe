@@ -171,8 +171,9 @@ export const SendMessageForm: FC<SendMessageFormProps> = () => {
         fileData: fileDataForStorage  // Also store it in fileData for immediate display
       };
 
-      // Store in local storage and update UI
+      // Store message under both sender and recipient addresses for proper conversation grouping
       messageStore.storeMessage(newMessageData, walletStore.address.toString());
+      messageStore.storeMessage(newMessageData, recipient);
       messageStore.addMessages([newMessageData]);
 
       // Only reset the message input, keep the recipient

@@ -3,19 +3,9 @@ import { useWalletStore } from "../store/wallet.store";
 import { useMessagingStore } from "../store/messaging.store";
 import { WalletStorage } from "../utils/wallet-storage";
 import { decrypt_message, EncryptedMessage } from "cipher";
-
-type Transaction = {
-  transaction_id: string;
-  payload: string;
-  block_time: number;
-  outputs: Array<{
-    amount: number;
-    script_public_key_address: string;
-  }>;
-  inputs: Array<{
-    previous_outpoint_address: string;
-  }>;
-};
+import { Transaction } from "../type/all";
+import { getApiEndpoint } from "../config/nodes";
+import "./FetchApiMessages.css";
 
 type FetchApiMessagesProps = {
   address: string;
@@ -38,12 +28,16 @@ export const FetchApiMessages: FC<FetchApiMessagesProps> = ({ address }) => {
     setError(null);
     
     try {
+      // Get the current network from the wallet store
+      const networkId = walletStore.selectedNetwork;
+      const baseUrl = getApiEndpoint(networkId);
+      
       // Ensure the address is properly formatted for the API
       const formattedAddress = address.includes(':') 
         ? encodeURIComponent(address)
-        : encodeURIComponent(`kaspatest:${address}`);
+        : encodeURIComponent(`${networkId === 'mainnet' ? 'kaspa:' : 'kaspatest:'}${address}`);
       
-      const apiUrl = `https://api-tn10.kaspa.org/addresses/${formattedAddress}/full-transactions-page?limit=50&before=0&after=0&resolve_previous_outpoints=no`;
+      const apiUrl = `${baseUrl}/addresses/${formattedAddress}/full-transactions-page?limit=50&before=0&after=0&resolve_previous_outpoints=no`;
       
       console.log("API Messages: Fetching from URL:", apiUrl);
       

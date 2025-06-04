@@ -1,4 +1,4 @@
-import { FC, useState, useEffect } from "react";
+import { FC, useState, useEffect, useRef } from "react";
 import { Message as MessageType } from "../type/all";
 import { decodePayload } from "../utils/all-in-one";
 import { formatKasAmount } from "../utils/format";
@@ -26,8 +26,10 @@ export const MessageDisplay: FC<MessageDisplayProps> = ({
     transactionId,
     fileData
   } = message;
+  
   const displayAddress = isOutgoing ? recipientAddress : senderAddress;
   const walletStore = useWalletStore();
+  const mounted = useRef(true);
 
   const shortDisplayAddress =
     displayAddress && displayAddress !== "Unknown"
@@ -38,10 +40,18 @@ export const MessageDisplay: FC<MessageDisplayProps> = ({
 
   const [decryptedContent, setDecryptedContent] = useState<string>("");
   const [decryptionError, setDecryptionError] = useState<string>("");
+  const [isDecrypting, setIsDecrypting] = useState<boolean>(false);
+  const [decryptionAttempted, setDecryptionAttempted] = useState<boolean>(false);
 
   // Parse and render message content
   const renderMessageContent = () => {
-    let messageToRender = decryptedContent || content;
+    // Wait for decryption attempt before showing content
+    if (isDecrypting) {
+      return <div className="decrypting">Decrypting message...</div>;
+    }
+
+    // Only use decrypted content if decryption was attempted and successful
+    let messageToRender = (decryptionAttempted && decryptedContent) || content;
     
     // Handle file/image messages
     if (fileData && fileData.type === 'file') {
@@ -73,10 +83,10 @@ export const MessageDisplay: FC<MessageDisplayProps> = ({
       const parsedContent = JSON.parse(messageToRender);
       if (parsedContent.type === 'file') {
         if (parsedContent.mimeType.startsWith('image/')) {
-          return <img src={parsedContent.content} alt={parsedContent.name} className="message-image" />;
+          return <img key={`img-${transactionId}`} src={parsedContent.content} alt={parsedContent.name} className="message-image" />;
         }
         return (
-          <div className="file-message">
+          <div key={`file-${transactionId}`} className="file-message">
             <div className="file-info">
               📎 {parsedContent.name} ({Math.round((parsedContent.size || 0) / 1024)}KB)
             </div>
@@ -103,9 +113,20 @@ export const MessageDisplay: FC<MessageDisplayProps> = ({
 
   useEffect(() => {
     const decryptMessage = async () => {
-      if (!payload || !walletStore.unlockedWallet) return;
+      if (!mounted.current || !payload || !walletStore.unlockedWallet) {
+        setDecryptionAttempted(true);
+        return;
+      }
+
+      setIsDecrypting(true);
+      setDecryptionAttempted(false);
 
       try {
+        // Add a small delay to ensure wallet is fully initialized
+        await new Promise(resolve => setTimeout(resolve, 100));
+
+        if (!mounted.current) return;
+
         // Check if the payload starts with the cipher prefix
         const prefix = "ciph_msg:"
           .split("")
@@ -122,53 +143,88 @@ export const MessageDisplay: FC<MessageDisplayProps> = ({
             walletStore.unlockedWallet.password
           );
 
+          let decrypted: string | null = null;
+          
           // Try decryption with receive key first
           try {
             const privateKey = privateKeyGenerator.receiveKey(0);
-            const decrypted = await CipherHelper.tryDecrypt(
+            decrypted = await CipherHelper.tryDecrypt(
               encryptedHex,
               privateKey.toString(),
               transactionId || `${senderAddress}-${timestamp}`
             );
-            setDecryptedContent(decrypted);
-            setDecryptionError("");
-            return;
           } catch (receiveErr) {
-            CipherHelper.log("Failed to decrypt with receive key:", receiveErr);
-            
             // Try with change key as fallback
             try {
               const changeKey = privateKeyGenerator.changeKey(0);
-              const decrypted = await CipherHelper.tryDecrypt(
+              decrypted = await CipherHelper.tryDecrypt(
                 encryptedHex,
                 changeKey.toString(),
                 transactionId || `${senderAddress}-${timestamp}`
               );
-              setDecryptedContent(decrypted);
-              setDecryptionError("");
-              return;
             } catch (changeErr) {
-              CipherHelper.error("Failed to decrypt with change key:", changeErr);
               throw new Error("Failed to decrypt with both receive and change keys");
             }
           }
+
+          if (mounted.current && decrypted) {
+            setDecryptedContent(decrypted);
+            setDecryptionError("");
+          }
         } else {
-          // If not encrypted, use the regular decodePayload
-          CipherHelper.log("Message not encrypted with cipher prefix, using regular decodePayload");
           const decoded = decodePayload(payload);
-          setDecryptedContent(decoded || "");
-          setDecryptionError("");
+          if (mounted.current) {
+            setDecryptedContent(decoded || "");
+            setDecryptionError("");
+          }
         }
       } catch (error) {
-        CipherHelper.error("Error in decryption process:", error);
-        const decoded = decodePayload(payload);
-        setDecryptedContent(decoded || "");
-        setDecryptionError((error as Error).message || "Failed to decrypt message");
+        if (mounted.current) {
+          const decoded = decodePayload(payload);
+          setDecryptedContent(decoded || "");
+          setDecryptionError((error as Error).message || "Failed to decrypt message");
+        }
+      } finally {
+        if (mounted.current) {
+          setIsDecrypting(false);
+          setDecryptionAttempted(true);
+        }
       }
     };
 
+    // Reset states when message changes
+    setDecryptedContent("");
+    setDecryptionError("");
+    setIsDecrypting(false);
+    setDecryptionAttempted(false);
+
+    // Start decryption
     decryptMessage();
+
+    // Cleanup function
+    return () => {
+      mounted.current = false;
+    };
   }, [payload, walletStore.unlockedWallet, transactionId, senderAddress, timestamp]);
+
+  // Set mounted ref on component mount
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+
+  // Add debug log for render
+  console.log("MessageDisplay: Rendering message", {
+    transactionId,
+    content,
+    decryptedContent,
+    finalContent: decryptedContent || content,
+    isOutgoing,
+    senderAddress,
+    recipientAddress
+  });
 
   return (
     <div className={`message ${isOutgoing ? "outgoing" : "incoming"}`}>
