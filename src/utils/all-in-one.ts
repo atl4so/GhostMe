@@ -264,11 +264,9 @@ export class KaspaClient {
   }
 
   // Log helper function
-  log(message: string, level = "log") {
-    if (this.options.debug) {
-      // @TODO: use a proper logging method
-      // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-      // @ts-ignore
+  log(message: string, level: 'log' | 'warn' | 'error' = 'log') {
+    // Only show errors and warnings
+    if (this.options.debug && (level === 'error' || level === 'warn')) {
       console[level](`[KaspaClient] ${message}`);
     }
   }

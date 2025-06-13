@@ -1049,14 +1049,6 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
 
   private async processMessageTransaction(tx: any, blockHash: string, blockTime: number) {
     try {
-      const txId = tx.verboseData?.transactionId;
-      if (!txId || this.processedMessageIds.has(txId)) {
-        return; // Skip if no txId or already processed
-      }
-
-      // Map to store transaction outputs for this block
-      const txOutputsMap = new Map<string, any[]>();
-
       // Get sender address from transaction inputs
       let senderAddress = null;
       if (tx.inputs && tx.inputs.length > 0) {
@@ -1066,19 +1058,10 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
         
         if (prevTxId && typeof prevOutputIndex === 'number') {
           try {
-            // First try to get from the previous transaction in this block
-            const prevTxOutputs = txOutputsMap.get(prevTxId);
-            if (prevTxOutputs && prevTxOutputs[prevOutputIndex]) {
-              senderAddress = prevTxOutputs[prevOutputIndex].verboseData?.scriptPublicKeyAddress;
-            }
-            
-            // If not found in this block, try the API
-            if (!senderAddress) {
-              const prevTx = await this._fetchTransactionDetails(prevTxId);
-              if (prevTx?.outputs && prevTx.outputs[prevOutputIndex]) {
-                const output = prevTx.outputs[prevOutputIndex];
-                senderAddress = output.verboseData?.scriptPublicKeyAddress;
-              }
+            const prevTx = await this._fetchTransactionDetails(prevTxId);
+            if (prevTx?.outputs && prevTx.outputs[prevOutputIndex]) {
+              const output = prevTx.outputs[prevOutputIndex];
+              senderAddress = output.verboseData?.scriptPublicKeyAddress;
             }
           } catch (error) {
             console.error("Error getting sender address:", error);
@@ -1086,141 +1069,65 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
         }
       }
 
-      // Get the recipient/output address from the outputs
-      let recipientAddress = null;
-      if (tx.outputs && tx.outputs.length > 0) {
-        // For optimized self-messages, there's only one output which is both recipient and sender
-        recipientAddress = tx.outputs[0].verboseData?.scriptPublicKeyAddress;
-      }
-
-      // If we still don't have a sender address and this isn't a self-message, try the change output
+      // If we still don't have a sender address, use the change output address
       if (!senderAddress && tx.outputs && tx.outputs.length > 1) {
-        // The second output is typically the change address going back to sender
         senderAddress = tx.outputs[1].verboseData?.scriptPublicKeyAddress;
       }
 
-      // Log final results
-      const isIncoming = recipientAddress === this.receiveAddress?.toString();
-      const isOutgoing = senderAddress === this.receiveAddress?.toString();
-      
-      console.log("Message participants:", {
-        senderAddress,
-        recipientAddress,
-        myAddress: this.receiveAddress?.toString(),
-        txId,
-        isIncoming,
-        isOutgoing
-      });
-
-      // Check if this is a monitored conversation
-      const messagingStore = useMessagingStore.getState();
-      const conversationManager = messagingStore?.conversationManager;
-      let conversationPartner = null;
-      
-      if (conversationManager) {
-        // Check both sender and recipient addresses for monitored conversations
-        if (senderAddress) {
-          const senderConv = conversationManager.getConversationByAddress(senderAddress);
-          if (senderConv) {
-            conversationPartner = senderAddress;
-          }
-        }
-        if (recipientAddress && !conversationPartner) {
-          const recipientConv = conversationManager.getConversationByAddress(recipientAddress);
-          if (recipientConv) {
-            conversationPartner = recipientAddress;
-          }
-        }
+      // Get the recipient address from the outputs
+      let recipientAddress = null;
+      if (tx.outputs && tx.outputs.length > 0) {
+        recipientAddress = tx.outputs[0].verboseData?.scriptPublicKeyAddress;
       }
 
-      // For monitored conversations, always preserve the conversation partner's address
-      if (conversationPartner) {
-        if (isOutgoing) {
-          recipientAddress = conversationPartner;
-        } else {
-          senderAddress = conversationPartner;
-        }
-        console.log("Using conversation partner address:", conversationPartner);
-      }
-
-      // Check if this is a cipher message
-      if (!tx.payload?.startsWith(this.MESSAGE_PREFIX_HEX)) {
-        console.log(`Skipping transaction ${tx.verboseData?.transactionId} - not a cipher message`);
+      // Process the message
+      if (!tx.payload.startsWith(this.MESSAGE_PREFIX_HEX)) {
         return;
       }
 
-      // Try to decode and decrypt the payload first
       try {
-        // First verify this is a message transaction by checking the prefix
-        if (!tx.payload.startsWith(this.MESSAGE_PREFIX_HEX)) {
-          return; // Skip this transaction
-        }
+        this.ensurePasswordSet();
+      } catch (error) {
+        return;
+      }
 
-        // Ensure password is set before attempting decryption
-        try {
-          this.ensurePasswordSet();
-        } catch (error: unknown) {
-          const errorMessage = error instanceof Error ? error.message : "Unknown error";
-          console.log(`Cannot decrypt message ${tx.verboseData?.transactionId} - ${errorMessage}`);
-          return;
-        }
+      const messageHex = tx.payload.substring(this.MESSAGE_PREFIX_HEX.length);
+      const handshakePrefix = "313a68616e647368616b653a";
+      const commPrefix = "313a636f6d6d3a";
+      
+      let messageType = 'unknown';
+      let isHandshake = false;
+      let targetAlias = null;
+      let encryptedHex = messageHex;
 
-        // Extract the raw message content after the prefix
-        const messageHex = tx.payload.substring(this.MESSAGE_PREFIX_HEX.length);
-        console.log("Processing message payload:", messageHex);
-        
-        // First check if this is a handshake message by looking at the hex prefix
-        const handshakePrefix = "313a68616e647368616b653a"; // "1:handshake:" in hex
-        const commPrefix = "313a636f6d6d3a"; // "1:comm:" in hex
-        
-        let messageType = 'unknown';
-        let isHandshake = false;
-        let targetAlias = null;
-        let encryptedHex = messageHex;  // Default to full message
-        
-        // Check for handshake first - if it is, don't try to parse as string
-        if (messageHex.startsWith(handshakePrefix)) {
-          messageType = 'handshake';
-          isHandshake = true;
-          encryptedHex = messageHex;  // Keep the full message for handshake
-        } else if (messageHex.startsWith(commPrefix)) {
-          // Only try to parse as string for comm messages
-          const hexToString = (hex: string) => {
-            let str = '';
-            for (let i = 0; i < hex.length; i += 2) {
-              str += String.fromCharCode(parseInt(hex.substr(i, 2), 16));
-            }
-            return str;
-          };
-
-          const messageStr = hexToString(messageHex);
-          console.log("Parsed message string:", messageStr);
-          const parts = messageStr.split(':');
-          console.log("Message parts:", parts);
-          
-          if (parts.length >= 4) {
-            messageType = 'comm';
-            targetAlias = parts[2];  // Alias is the third part
-            encryptedHex = parts[3];  // Encrypted message is the fourth part
-            console.log("Comm message details:", { 
-              targetAlias, 
-              encryptedHexLength: encryptedHex?.length,
-              monitoredConversations: Array.from(this.monitoredConversations)
-            });
+      if (messageHex.startsWith(handshakePrefix)) {
+        messageType = 'handshake';
+        isHandshake = true;
+        encryptedHex = messageHex;
+      } else if (messageHex.startsWith(commPrefix)) {
+        const hexToString = (hex: string) => {
+          let str = '';
+          for (let i = 0; i < hex.length; i += 2) {
+            str += String.fromCharCode(parseInt(hex.substr(i, 2), 16));
           }
+          return str;
+        };
+
+        const messageStr = hexToString(messageHex);
+        const parts = messageStr.split(':');
+        
+        if (parts.length >= 4) {
+          messageType = 'comm';
+          targetAlias = parts[2];
+          encryptedHex = parts[3];
         }
+      }
 
-        // For handshake messages, we process regardless of monitored status
-        // For regular messages, we only process if the address is monitored
-        const isMonitoredAddress = (senderAddress && this.monitoredAddresses.has(senderAddress)) ||
-                                (recipientAddress && this.monitoredAddresses.has(recipientAddress));
+      const isMonitoredAddress = (senderAddress && this.monitoredAddresses.has(senderAddress)) ||
+                              (recipientAddress && this.monitoredAddresses.has(recipientAddress));
+      const isCommForUs = messageType === 'comm' && targetAlias && this.monitoredConversations.has(targetAlias);
 
-        // For comm messages, check if we're monitoring this alias
-        const isCommForUs = messageType === 'comm' && targetAlias && this.monitoredConversations.has(targetAlias);
-
-        // Try to decrypt the message
-        try {
-        // Get private key for decryption
+      try {
         const privateKeyGenerator = WalletStorage.getPrivateKeyGenerator(
           this.unlockedWallet,
           this.password!
@@ -1229,99 +1136,85 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
         let decryptedContent = "";
         let decryptionSuccess = false;
 
-        // Try with receive key first
         try {
           const privateKey = privateKeyGenerator.receiveKey(0);
-            const result = await CipherHelper.tryDecrypt(encryptedHex, privateKey.toString(), txId);
+          const txId = tx.verboseData?.transactionId;
+          if (!txId) {
+            throw new Error("Transaction ID is missing");
+          }
+          const result = await CipherHelper.tryDecrypt(encryptedHex, privateKey.toString(), txId);
           decryptedContent = result;
           decryptionSuccess = true;
-          console.log(`Successfully decrypted message with receive key:`, decryptedContent);
 
-            // Check if this is a handshake message by looking at the decrypted content
+          if (decryptedContent.includes('"type":"handshake"')) {
+            messageType = 'handshake';
+            isHandshake = true;
+            try {
+              const handshakeData = JSON.parse(decryptedContent);
+              if (handshakeData.isResponse) {
+                await this.updateMonitoredConversations();
+              }
+            } catch (error) {
+              console.error("Error parsing handshake data:", error);
+            }
+          }
+        } catch (error) {
+          if (process.env.NODE_ENV === 'development') {
+            console.debug(`Failed to decrypt with receive key:`, error);
+          }
+        }
+
+        if (!decryptionSuccess) {
+          try {
+            const privateKey = privateKeyGenerator.changeKey(0);
+            const txId = tx.verboseData?.transactionId;
+            if (!txId) {
+              throw new Error("Transaction ID is missing");
+            }
+            const result = await CipherHelper.tryDecrypt(encryptedHex, privateKey.toString(), txId);
+            decryptedContent = result;
+            decryptionSuccess = true;
+
             if (decryptedContent.includes('"type":"handshake"')) {
               messageType = 'handshake';
               isHandshake = true;
-              // Parse the handshake content to check if it's a response
               try {
                 const handshakeData = JSON.parse(decryptedContent);
                 if (handshakeData.isResponse) {
-                  console.log("Detected handshake response:", handshakeData);
-                  // Update monitored conversations immediately for responses
                   await this.updateMonitoredConversations();
                 }
               } catch (error) {
                 console.error("Error parsing handshake data:", error);
               }
             }
-        } catch (error) {
-          console.log(`Failed to decrypt with receive key:`, error);
-        }
-
-        // If not decrypted, try with change key
-        if (!decryptionSuccess) {
-          try {
-            const privateKey = privateKeyGenerator.changeKey(0);
-              const result = await CipherHelper.tryDecrypt(encryptedHex, privateKey.toString(), txId);
-            decryptedContent = result;
-            decryptionSuccess = true;
-            console.log(`Successfully decrypted message with change key:`, decryptedContent);
-
-              // Check if this is a handshake message by looking at the decrypted content
-              if (decryptedContent.includes('"type":"handshake"')) {
-                messageType = 'handshake';
-                isHandshake = true;
-                // Parse the handshake content to check if it's a response
-                try {
-                  const handshakeData = JSON.parse(decryptedContent);
-                  if (handshakeData.isResponse) {
-                    console.log("Detected handshake response:", handshakeData);
-                    // Update monitored conversations immediately for responses
-                    await this.updateMonitoredConversations();
-                  }
-                } catch (error) {
-                  console.error("Error parsing handshake data:", error);
-                }
-              }
           } catch (error) {
-            console.log(`Failed to decrypt with change key:`, error);
+            if (process.env.NODE_ENV === 'development') {
+              console.debug(`Failed to decrypt with change key:`, error);
+            }
           }
         }
 
-        console.log("Message analysis:", {
-          txId: tx.verboseData?.transactionId,
-          senderAddress,
-          recipientAddress,
-          isHandshake,
-          isMonitoredAddress,
-          messageType,
-            targetAlias,
-            isCommForUs,
-          decryptionSuccess,
-          decryptedContent: decryptionSuccess ? decryptedContent : null,
-            monitoredAddresses: Array.from(this.monitoredAddresses.keys()),
-            monitoredConversations: Array.from(this.monitoredConversations)
-        });
-
-        // Process the message if:
-        // 1. It's a handshake message (always process these)
-        // 2. OR it's a monitored address (for regular messages)
-          // 3. OR it's a comm message with our alias
-          if (decryptionSuccess && (isHandshake || isMonitoredAddress || isCommForUs)) {
-          // Create message object
+        if (decryptionSuccess && (isHandshake || isMonitoredAddress || isCommForUs)) {
+          const txId = tx.verboseData?.transactionId;
+          if (!txId) {
+            throw new Error("Transaction ID is missing");
+          }
           const message: DecodedMessage = {
-            transactionId: tx.verboseData?.transactionId,
-            senderAddress,
-            recipientAddress,
-            content: decryptedContent,
+            transactionId: txId,
+            senderAddress: senderAddress || "Unknown",
+            recipientAddress: recipientAddress || "Unknown",
             timestamp: blockTime,
-              amount: tx.amount || 0,  // Use transaction amount or default to 0
+            content: decryptedContent,
+            amount: Number(tx.outputs[0].value) / 100000000,
             payload: tx.payload
           };
 
-          // Track this message
-          this.processedMessageIds.add(tx.verboseData?.transactionId);
-          
-          // Store the message
+          this.processedMessageIds.add(txId);
+          if (this.processedMessageIds.size > this.MAX_PROCESSED_MESSAGES) {
+            const oldestId = this.processedMessageIds.values().next().value;
+            this.processedMessageIds.delete(oldestId);
+          }
+
           if (this.receiveAddress) {
             const messagingStore = useMessagingStore.getState();
             if (messagingStore) {
@@ -1331,21 +1224,15 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
             }
           }
 
-            // If this was a handshake message, update monitored conversations
           if (isHandshake) {
             await this.updateMonitoredConversations();
           }
 
-          // Emit the message event
           this.emit("messageReceived", message);
         }
       } catch (error) {
-        console.error("Error processing message payload:", error);
-        }
-      } catch (error) {
-        console.error(`Error processing message transaction ${tx.verboseData?.transactionId}:`, error);
+        console.error("Error processing message:", error);
       }
-
     } catch (error) {
       console.error(`Error processing message transaction ${tx.verboseData?.transactionId}:`, error);
     }
@@ -1399,16 +1286,9 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
 
     // We're involved if we're either the recipient (message output)
     // or the sender (change output)
-    const isInvolved = messageAddress === ourAddress || changeAddress === ourAddress;
-    
-    if (isInvolved) {
-      console.log(`Transaction ${tx.verboseData?.transactionId} involves our address as ${messageAddress === ourAddress ? 'recipient' : 'sender'}`);
-    }
-    
-    return isInvolved;
+    return messageAddress === ourAddress || changeAddress === ourAddress;
   }
 
-  // Add this helper method to the class
   private stringifyWithBigInt(obj: any): string {
     return JSON.stringify(obj, (_, value) => 
       typeof value === 'bigint' ? value.toString() : value
@@ -1507,28 +1387,21 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
 
   private async updateMonitoredConversations() {
     try {
-      // Import the messaging store
       const { useMessagingStore } = await import('../store/messaging.store');
       const messagingStore = useMessagingStore.getState();
       const conversationManager = messagingStore?.conversationManager;
       
-      if (!conversationManager) {
-        console.log("No conversation manager available");
-        return;
-      }
+      if (!conversationManager) return;
 
       // Update our monitored conversations
       this.monitoredConversations.clear();
       this.monitoredAddresses.clear();
       const conversations = conversationManager.getMonitoredConversations();
       
-      console.log("Updating monitored conversations:", conversations);
-      
+      // Silently update monitored conversations
       conversations.forEach((conv: { alias: string, address: string }) => {
-          // Monitor both aliases and associate them with the partner's address
-          this.monitoredConversations.add(conv.alias);
-          this.monitoredAddresses.set(conv.address, conv.alias);
-          console.log(`Now monitoring alias: ${conv.alias} for address: ${conv.address}`);
+        this.monitoredConversations.add(conv.alias);
+        this.monitoredAddresses.set(conv.address, conv.alias);
       });
     } catch (error) {
       console.error("Error updating monitored conversations:", error);
@@ -1537,15 +1410,11 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
 
   private async processBlockEvent(event: any) {
     try {
-      console.log("Processing block event:", stringifyWithBigInt(event));
-      
       const blockTime = Number(event?.data?.block?.header?.timestamp) || Date.now();
       const blockHash = event?.data?.block?.header?.hash;
-      
-      // Process transactions if they exist
       const transactions = event?.data?.block?.transactions || [];
       
-      // Create a map of transaction IDs to their outputs for quick lookup
+      // Process transactions silently
       const txOutputsMap = new Map<string, any[]>();
       transactions.forEach((tx: any) => {
         if (tx.outputs && tx.verboseData?.transactionId) {
@@ -1553,251 +1422,20 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
         }
       });
       
-      // Update monitored conversations before processing block
       await this.updateMonitoredConversations();
       
       for (const tx of transactions) {
         const txId = tx.verboseData?.transactionId;
         if (!txId || this.processedMessageIds.has(txId)) continue;
 
-        // Check if this is a message transaction
         if (this.isMessageTransaction(tx)) {
-          // Get sender address from transaction inputs
-          let senderAddress = null;
-          if (tx.inputs && tx.inputs.length > 0) {
-            const input = tx.inputs[0];
-            const prevTxId = input.previousOutpoint?.transactionId;
-            const prevOutputIndex = input.previousOutpoint?.index;
-            
-            if (prevTxId && typeof prevOutputIndex === 'number') {
-              try {
-                // First try to get from the previous transaction in this block
-                const prevTxOutputs = txOutputsMap.get(prevTxId);
-                if (prevTxOutputs && prevTxOutputs[prevOutputIndex]) {
-                  senderAddress = prevTxOutputs[prevOutputIndex].verboseData?.scriptPublicKeyAddress;
-                }
-                
-                // If not found in this block, try the API
-                if (!senderAddress) {
-                  const prevTx = await this._fetchTransactionDetails(prevTxId);
-                  if (prevTx?.outputs && prevTx.outputs[prevOutputIndex]) {
-                    const output = prevTx.outputs[prevOutputIndex];
-                    senderAddress = output.verboseData?.scriptPublicKeyAddress;
-                  }
-                }
-              } catch (error) {
-                console.error("Error getting sender address:", error);
-              }
-            }
-          }
-
-          // If we still don't have a sender address, use the change output address
-          if (!senderAddress && tx.outputs && tx.outputs.length > 1) {
-            // The second output is typically the change address going back to sender
-            senderAddress = tx.outputs[1].verboseData?.scriptPublicKeyAddress;
-          }
-
-          // Get the recipient address from the outputs
-          let recipientAddress = null;
-          if (tx.outputs && tx.outputs.length > 0) {
-            recipientAddress = tx.outputs[0].verboseData?.scriptPublicKeyAddress;
-          }
-
-          // Try to decode and decrypt the payload first
           try {
-            // First verify this is a message transaction by checking the prefix
-            if (!tx.payload.startsWith(this.MESSAGE_PREFIX_HEX)) {
-              return; // Skip this transaction
-            }
-
-            // Ensure password is set before attempting decryption
-            try {
-              this.ensurePasswordSet();
-            } catch (error: unknown) {
-              const errorMessage = error instanceof Error ? error.message : "Unknown error";
-              console.log(`Cannot decrypt message ${txId} - ${errorMessage}`);
-              return;
-            }
-
-            // Extract the raw message content after the prefix
-            const messageHex = tx.payload.substring(this.MESSAGE_PREFIX_HEX.length);
-            console.log("Processing message payload:", messageHex);
-            
-            // First check if this is a handshake message by looking at the hex prefix
-            const handshakePrefix = "313a68616e647368616b653a"; // "1:handshake:" in hex
-            const commPrefix = "313a636f6d6d3a"; // "1:comm:" in hex
-            
-            let messageType = 'unknown';
-            let isHandshake = false;
-            let targetAlias = null;
-            let encryptedHex = messageHex;  // Default to full message
-            
-            // Check for handshake first - if it is, don't try to parse as string
-            if (messageHex.startsWith(handshakePrefix)) {
-              messageType = 'handshake';
-              isHandshake = true;
-              encryptedHex = messageHex;  // Keep the full message for handshake
-            } else if (messageHex.startsWith(commPrefix)) {
-              // Only try to parse as string for comm messages
-              const hexToString = (hex: string) => {
-                let str = '';
-                for (let i = 0; i < hex.length; i += 2) {
-                  str += String.fromCharCode(parseInt(hex.substr(i, 2), 16));
-                }
-                return str;
-              };
-
-              const messageStr = hexToString(messageHex);
-              console.log("Parsed message string:", messageStr);
-              const parts = messageStr.split(':');
-              console.log("Message parts:", parts);
-              
-              if (parts.length >= 4) {
-                messageType = 'comm';
-                targetAlias = parts[2];  // Alias is the third part
-                encryptedHex = parts[3];  // Encrypted message is the fourth part
-                console.log("Comm message details:", { 
-                  targetAlias, 
-                  encryptedHexLength: encryptedHex?.length,
-                  monitoredConversations: Array.from(this.monitoredConversations)
-                });
-              }
-            }
-
-            // For handshake messages, we process regardless of monitored status
-            // For regular messages, we only process if the address is monitored
-            const isMonitoredAddress = (senderAddress && this.monitoredAddresses.has(senderAddress)) ||
-                                    (recipientAddress && this.monitoredAddresses.has(recipientAddress));
-
-            // For comm messages, check if we're monitoring this alias
-            const isCommForUs = messageType === 'comm' && targetAlias && this.monitoredConversations.has(targetAlias);
-
-            // Try to decrypt the message
-            try {
-            // Get private key for decryption
-            const privateKeyGenerator = WalletStorage.getPrivateKeyGenerator(
-              this.unlockedWallet,
-              this.password!
-            );
-            
-            let decryptedContent = "";
-            let decryptionSuccess = false;
-
-            // Try with receive key first
-            try {
-              const privateKey = privateKeyGenerator.receiveKey(0);
-                const result = await CipherHelper.tryDecrypt(encryptedHex, privateKey.toString(), txId);
-              decryptedContent = result;
-              decryptionSuccess = true;
-              console.log(`Successfully decrypted message with receive key:`, decryptedContent);
-
-                // Check if this is a handshake message by looking at the decrypted content
-                if (decryptedContent.includes('"type":"handshake"')) {
-                  messageType = 'handshake';
-                  isHandshake = true;
-                  // Parse the handshake content to check if it's a response
-                  try {
-                    const handshakeData = JSON.parse(decryptedContent);
-                    if (handshakeData.isResponse) {
-                      console.log("Detected handshake response:", handshakeData);
-                      // Update monitored conversations immediately for responses
-                      await this.updateMonitoredConversations();
-                    }
-                  } catch (error) {
-                    console.error("Error parsing handshake data:", error);
-                  }
-                }
-            } catch (error) {
-              console.log(`Failed to decrypt with receive key:`, error);
-            }
-
-            // If not decrypted, try with change key
-            if (!decryptionSuccess) {
-              try {
-                const privateKey = privateKeyGenerator.changeKey(0);
-                  const result = await CipherHelper.tryDecrypt(encryptedHex, privateKey.toString(), txId);
-                decryptedContent = result;
-                decryptionSuccess = true;
-                console.log(`Successfully decrypted message with change key:`, decryptedContent);
-
-                  // Check if this is a handshake message by looking at the decrypted content
-                  if (decryptedContent.includes('"type":"handshake"')) {
-                    messageType = 'handshake';
-                    isHandshake = true;
-                    // Parse the handshake content to check if it's a response
-                    try {
-                      const handshakeData = JSON.parse(decryptedContent);
-                      if (handshakeData.isResponse) {
-                        console.log("Detected handshake response:", handshakeData);
-                        // Update monitored conversations immediately for responses
-                        await this.updateMonitoredConversations();
-                      }
-                    } catch (error) {
-                      console.error("Error parsing handshake data:", error);
-                    }
-                  }
-              } catch (error) {
-                console.log(`Failed to decrypt with change key:`, error);
-              }
-            }
-
-            console.log("Message analysis:", {
-              txId: tx.verboseData?.transactionId,
-              senderAddress,
-              recipientAddress,
-              isHandshake,
-              isMonitoredAddress,
-              messageType,
-                targetAlias,
-                isCommForUs,
-              decryptionSuccess,
-              decryptedContent: decryptionSuccess ? decryptedContent : null,
-                monitoredAddresses: Array.from(this.monitoredAddresses.keys()),
-                monitoredConversations: Array.from(this.monitoredConversations)
-            });
-
-            // Process the message if:
-            // 1. It's a handshake message (always process these)
-            // 2. OR it's a monitored address (for regular messages)
-              // 3. OR it's a comm message with our alias
-              if (decryptionSuccess && (isHandshake || isMonitoredAddress || isCommForUs)) {
-              // Create message object
-              const message: DecodedMessage = {
-                  transactionId: tx.verboseData?.transactionId,
-                senderAddress,
-                recipientAddress,
-                content: decryptedContent,
-                timestamp: blockTime,
-                  amount: tx.amount || 0,  // Use transaction amount or default to 0
-                payload: tx.payload
-              };
-
-              // Track this message
-                this.processedMessageIds.add(tx.verboseData?.transactionId);
-              
-              // Store the message
-              if (this.receiveAddress) {
-                const messagingStore = useMessagingStore.getState();
-                if (messagingStore) {
-                  const myAddress = this.receiveAddress.toString();
-                  messagingStore.storeMessage(message, myAddress);
-                  messagingStore.loadMessages(myAddress);
-                }
-              }
-
-                // If this was a handshake message, update monitored conversations
-              if (isHandshake) {
-                await this.updateMonitoredConversations();
-              }
-
-              // Emit the message event
-              this.emit("messageReceived", message);
-              }
-            } catch (error) {
-              console.error("Error processing message payload:", error);
-            }
+            // Process message transaction silently
+            await this.processMessageTransaction(tx, blockHash, blockTime);
           } catch (error) {
-            console.error("Error processing message payload:", error);
+            if (process.env.NODE_ENV === 'development') {
+              console.debug("Error processing message transaction:", error);
+            }
           }
         }
       }

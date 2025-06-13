@@ -23,7 +23,7 @@ export const OneLiner: FC = () => {
   const [isConnected, setIsConnected] = useState(false);
   const [currentClient, setCurrentClient] = useState<KaspaClient | null>(null);
   const [connectionStatus, setConnectionStatus] = useState("Waiting for interaction");
-  const [selectedNetwork, setSelectedNetwork] = useState<NetworkType>("testnet-10");
+  const [selectedNetwork, setSelectedNetwork] = useState<NetworkType>("mainnet");
   const [connectionAttemptInProgress, setConnectionAttemptInProgress] = useState(false);
 
   const messageStore = useMessagingStore();

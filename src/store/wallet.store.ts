@@ -63,7 +63,7 @@ export const useWalletStore = create<WalletState>((set, get) => {
     rpcClient: null,
     isAccountServiceRunning: false,
     accountService: null,
-    selectedNetwork: "testnet-10",
+    selectedNetwork: "mainnet",
 
     loadWallets: () => {
       const wallets = _walletStorage.getWalletList();

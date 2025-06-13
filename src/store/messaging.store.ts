@@ -23,7 +23,7 @@ interface HandshakeState {
 // Helper function to determine network type from address
 function getNetworkTypeFromAddress(address: string): NetworkType {
   if (address.startsWith('kaspatest:')) {
-    return NetworkType.Testnet;
+    return NetworkType.Mainnet;
   } else if (address.startsWith('kaspadev:')) {
     return NetworkType.Devnet;
   }
@@ -395,7 +395,7 @@ export const useMessagingStore = create<MessagingState>((set, g) => ({
       const receiveKey = privateKeyGenerator.receiveKey(0);
       
       // Get the current network type from the first message's address
-      let networkType = NetworkType.Testnet; // Default to testnet
+      let networkType = NetworkType.Mainnet; // Default to mainnet
       const addresses = Object.keys(messagesMap);
       if (addresses.length > 0) {
         networkType = getNetworkTypeFromAddress(addresses[0]);
@@ -494,7 +494,7 @@ export const useMessagingStore = create<MessagingState>((set, g) => ({
       );
       
       // Get network type and current address first
-      let networkType = NetworkType.Testnet; // Default to testnet
+      let networkType = NetworkType.Mainnet; // Default to mainnet
       const addresses = Object.keys(mergedMessages);
       if (addresses.length > 0) {
         networkType = getNetworkTypeFromAddress(addresses[0]);
