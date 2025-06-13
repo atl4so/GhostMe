@@ -1212,7 +1212,10 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
           this.processedMessageIds.add(txId);
           if (this.processedMessageIds.size > this.MAX_PROCESSED_MESSAGES) {
             const oldestId = this.processedMessageIds.values().next().value;
-            this.processedMessageIds.delete(oldestId);
+
+            if (oldestId) {
+              this.processedMessageIds.delete(oldestId);
+            }
           }
 
           if (this.receiveAddress) {

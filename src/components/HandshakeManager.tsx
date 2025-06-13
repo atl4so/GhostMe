@@ -24,7 +24,7 @@ const HandshakeManager: React.FC = () => {
         theirAlias: conversation.theirAlias || null,
         senderAddress: conversation.kaspaAddress,
         kaspaAddress: conversation.kaspaAddress,
-        status: conversation.status === 'inactive' ? 'rejected' : conversation.status,
+        status: conversation.status,
         createdAt: conversation.createdAt,
         lastActivity: conversation.lastActivity,
         initiatedByMe: conversation.initiatedByMe,

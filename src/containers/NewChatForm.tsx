@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useMessagingStore } from '../store/messaging.store';
 import { Address } from 'kaspa-wasm';
+import { Conversation } from 'src/utils/conversation-manager';
 
 export const NewChatForm: React.FC = () => {
   const [recipientAddress, setRecipientAddress] = useState('');
@@ -28,9 +29,9 @@ export const NewChatForm: React.FC = () => {
     }
   };
 
-  const handleRespondToHandshake = async (conversationId: string) => {
+  const handleRespondToHandshake = async (handshake: Conversation) => {
     try {
-      await messagingStore.respondToHandshake(conversationId);
+      await messagingStore.respondToHandshake(handshake);
     } catch (err) {
       setError((err as Error).message);
     }
@@ -62,7 +63,7 @@ export const NewChatForm: React.FC = () => {
               <span>From: {handshake.kaspaAddress}</span>
               {!handshake.initiatedByMe && (
                 <button 
-                  onClick={() => handleRespondToHandshake(handshake.conversationId)}
+                  onClick={() => handleRespondToHandshake(handshake)}
                   className="respond-button"
                 >
                   Accept & Respond

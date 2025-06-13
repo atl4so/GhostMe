@@ -37,7 +37,6 @@ export const WalletGuard = ({ onSuccess, selectedNetwork, onNetworkChange, isCon
     deleteWallet,
     unlock,
     lock,
-    currentClient,
     selectedNetwork: currentSelectedNetwork
   } = useWalletStore();
 
