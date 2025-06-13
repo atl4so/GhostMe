@@ -5,6 +5,7 @@ export type Message = {
   timestamp: number;
   content: string;
   amount: number;
+  fee?: number;
   payload: string;
   fileData?: {
     type: string;
@@ -19,6 +20,7 @@ export type Contact = {
   address: string;
   lastMessage: Message;
   messages: Message[];
+  status?: 'active' | 'pending' | 'rejected';
 };
 
 export type NetworkType = "mainnet" | "testnet-10" | "testnet-11" | "devnet";

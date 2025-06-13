@@ -93,14 +93,25 @@ export const WalletGuard = ({ onSuccess, selectedNetwork, onNetworkChange, isCon
 
   const onUnlockWallet = async () => {
     if (!selectedWalletId || !passwordRef.current?.value) {
-      setError("Please select a wallet and enter password");
+      setError("Please enter your wallet password");
       return;
     }
 
     try {
       await unlock(selectedWalletId, passwordRef.current.value);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Invalid password");
+      console.error("Unlock error:", err);
+      // Clear the password field and focus it
+      if (passwordRef.current) {
+        passwordRef.current.value = "";
+        passwordRef.current.focus();
+      }
+      // Show user-friendly error message
+      if (err instanceof Error && err.message.toLowerCase().includes("invalid password")) {
+        setError("Incorrect password. Please try again.");
+      } else {
+        setError("Failed to unlock wallet. Please try again.");
+      }
     }
   };
 
@@ -227,17 +238,33 @@ export const WalletGuard = ({ onSuccess, selectedNetwork, onNetworkChange, isCon
   }
 
   if (step.type === "unlock") {
+    const selectedWallet = wallets.find(w => w.id === selectedWalletId);
     return (
       <div className="wallet-guard">
         <h2>Unlock Wallet</h2>
+        {selectedWallet && (
+          <div className="selected-wallet-info">
+            <span className="wallet-name">{selectedWallet.name}</span>
+          </div>
+        )}
         <div className="form-group">
           <label>Password</label>
-          <input ref={passwordRef} type="password" placeholder="Enter password" />
+          <input 
+            ref={passwordRef} 
+            type="password" 
+            placeholder="Enter your password" 
+            className={error ? "error" : ""}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                onUnlockWallet();
+              }
+            }}
+          />
         </div>
         {error && <div className="error">{error}</div>}
         <div className="form-actions">
           <button onClick={() => onClickStep("home")}>Back</button>
-        <button onClick={onUnlockWallet}>Unlock</button>
+          <button onClick={onUnlockWallet}>Unlock</button>
         </div>
       </div>
     );
@@ -250,6 +277,9 @@ export const WalletGuard = ({ onSuccess, selectedNetwork, onNetworkChange, isCon
         {step.type === "finalizing" && step.mnemonic && (
           <div className="mnemonic-display">
             <p>Please save your mnemonic phrase securely:</p>
+            <div className="warning-message">
+              ⚠️ This is the only time you will see your seed phrase - back it up now!
+            </div>
             <div className="show-phrase-toggle">
               <input 
                 type="checkbox" 

@@ -184,7 +184,7 @@ export const useWalletStore = create<WalletState>((set, get) => {
         return wallet;
       } catch (error) {
         console.error("Failed to unlock wallet:", error);
-        return null;
+        throw error;
       }
     },
 
@@ -299,11 +299,48 @@ export const useWalletStore = create<WalletState>((set, get) => {
       set({ rpcClient: null, address: null, isAccountServiceRunning: false });
     },
 
-    sendMessage: (message, toAddress, password) => {
-      if (!_accountService) {
-        throw Error("Account service not initialized.");
+    sendMessage: async (message: string, toAddress: Address, password: string) => {
+      const state = get();
+      if (!state.unlockedWallet || !state.accountService) {
+        throw new Error("Wallet not unlocked or account service not running");
       }
-      return _accountService.sendMessage({ message, toAddress, password });
+
+      try {
+        // Check if this is a handshake message
+        if (message.startsWith('ciph_msg:') && message.includes(':handshake:')) {
+          // Parse the handshake payload
+          const parts = message.split(':');
+          const jsonPart = parts.slice(3).join(':');
+          const handshakePayload = JSON.parse(jsonPart);
+
+          // Always send handshake messages to the recipient's address
+          console.log('Sending handshake message to:', toAddress.toString());
+          const encryptedMessage = await encrypt_message(toAddress.toString(), message);
+          if (!encryptedMessage) {
+            throw new Error("Failed to encrypt handshake message");
+      }
+          return await state.accountService.sendMessage({
+            message: encryptedMessage.to_hex(),
+            toAddress,
+            password
+          });
+        }
+
+        // For regular messages, send to recipient
+        console.log('Sending regular message to recipient:', toAddress.toString());
+        const encryptedMessage = await encrypt_message(toAddress.toString(), message);
+        if (!encryptedMessage) {
+          throw new Error("Failed to encrypt message");
+        }
+        return await state.accountService.sendMessage({
+          message: encryptedMessage.to_hex(),
+          toAddress,
+          password
+        });
+      } catch (error) {
+        console.error("Error sending message:", error);
+        throw error;
+      }
     },
     
     sendPreEncryptedMessage: (preEncryptedHex, toAddress, password) => {
