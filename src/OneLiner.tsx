@@ -14,6 +14,8 @@ import { ErrorCard } from "./components/ErrorCard";
 import { useWalletStore } from "./store/wallet.store";
 import { WalletGuard } from "./containers/WalletGuard";
 import { FetchApiMessages } from "./components/FetchApiMessages";
+import { NewChatForm } from './components/NewChatForm';
+import styles from './OneLiner.module.css';
 
 export const OneLiner: FC = () => {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -159,9 +161,22 @@ export const OneLiner: FC = () => {
     setIsWalletReady(true);
   }, []);
 
-  const onNewChatClicked = useCallback(() => {
+  const onNewChatClicked = useCallback(async () => {
+    try {
+      if (!walletStore.unlockedWallet?.password) {
+        setErrorMessage("Please unlock your wallet first");
+        return;
+      }
+
     messageStore.setIsCreatingNewChat(true);
-  }, [messageStore]);
+
+      // The UI should now show a form to enter recipient address
+      // When address is entered, it will call initiateHandshake
+    } catch (error) {
+      console.error("Failed to start new chat:", error);
+      setErrorMessage(`Failed to start new chat: ${unknownErrorToErrorLike(error)}`);
+    }
+  }, [walletStore.unlockedWallet, messageStore]);
 
   const onClearHistory = useCallback(() => {
     if (!walletStore.address) {
@@ -240,6 +255,9 @@ export const OneLiner: FC = () => {
       const { receiveAddress } = await walletStore.start(currentClient);
       const receiveAddressStr = receiveAddress.toString();
 
+      // Initialize conversation manager
+      messageStore.initializeConversationManager(receiveAddressStr);
+
       // Load existing messages
       messageStore.loadMessages(receiveAddressStr);
       messageStore.setIsLoaded(true);
@@ -248,7 +266,7 @@ export const OneLiner: FC = () => {
       console.error("Failed to start messaging process:", error);
       setErrorMessage(`Failed to start messaging: ${unknownErrorToErrorLike(error)}`);
     }
-  }, [currentClient, messageStore, walletStore]);
+  }, [currentClient, walletStore, messageStore]);
 
   const onContactClicked = useCallback(
     (contact: Contact) => {
@@ -263,8 +281,29 @@ export const OneLiner: FC = () => {
     [messageStore, walletStore.address]
   );
 
+  // Add function to handle handshake initiation
+  const initiateHandshakeWithRecipient = useCallback(async (recipientAddress: string) => {
+    try {
+      if (!walletStore.unlockedWallet?.password) {
+        throw new Error("Wallet must be unlocked");
+      }
+
+      // Initiate handshake and get payload
+      const { payload, conversation } = await messageStore.initiateHandshake(recipientAddress);
+
+      // Create and send transaction with handshake payload
+      // You'll need to implement the actual transaction sending here
+      // This might involve using your existing transaction creation methods
+
+      messageStore.setIsCreatingNewChat(false);
+    } catch (error) {
+      console.error("Failed to initiate handshake:", error);
+      setErrorMessage(`Failed to initiate handshake: ${unknownErrorToErrorLike(error)}`);
+    }
+  }, [walletStore.unlockedWallet, messageStore]);
+
   return (
-    <>
+    <div className="container">
       <div className="header-container">
         <div className="app-title">
           <img src="/kasia-logo.png" alt="Kasia Logo" className="app-logo" />
@@ -322,14 +361,16 @@ export const OneLiner: FC = () => {
               </button>
             </div>
             <div className="contacts-list">
-              {messageStore.contacts?.filter(c => c?.address).map((c) => (
-                <ContactCard
-                  isSelected={c.address === messageStore.openedRecipient}
-                  key={c.address}
-                  contact={c}
-                  onClick={onContactClicked}
-                />
-              ))}
+              {messageStore.contacts
+                ?.filter(c => c?.address && c.address !== walletStore.address?.toString())
+                .map((c) => (
+                  <ContactCard
+                    isSelected={c.address === messageStore.openedRecipient}
+                    key={`${c.address}-${c.status || 'unknown'}`}
+                    contact={c}
+                    onClick={onContactClicked}
+                  />
+                ))}
             </div>
           </div>
           <div className="messages-section">
@@ -396,6 +437,13 @@ export const OneLiner: FC = () => {
       <div id="transactions">
         <ErrorCard error={errorMessage} />
       </div>
-    </>
+
+      {/* Add NewChatForm when isCreatingNewChat is true */}
+      {messageStore.isCreatingNewChat && (
+        <div className={styles['modal-overlay']}>
+          <NewChatForm onClose={() => messageStore.setIsCreatingNewChat(false)} />
+        </div>
+      )}
+    </div>
   );
 };

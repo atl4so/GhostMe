@@ -6,6 +6,8 @@ import { decrypt_message, decrypt_message_with_bytes, decrypt_with_secret_key } 
 import { useWalletStore } from "../store/wallet.store";
 import { WalletStorage } from "../utils/wallet-storage";
 import { CipherHelper } from "../utils/cipher-helper";
+import { useMessagingStore } from '../store/messaging.store';
+import { HandshakeResponse } from './HandshakeResponse';
 
 type MessageDisplayProps = {
   message: MessageType;
@@ -23,28 +25,99 @@ export const MessageDisplay: FC<MessageDisplayProps> = ({
     payload,
     content,
     amount,
+    fee,
     transactionId,
     fileData
   } = message;
   
   const displayAddress = isOutgoing ? recipientAddress : senderAddress;
   const walletStore = useWalletStore();
+  const messagingStore = useMessagingStore();
   const mounted = useRef(true);
 
-  const shortDisplayAddress =
-    displayAddress && displayAddress !== "Unknown"
-      ? `${displayAddress.substring(0, 12)}...${displayAddress.substring(
-          displayAddress.length - 12
-        )}`
-      : "Unknown";
+  // Check if this is a handshake message
+  const isHandshake = (payload?.startsWith('ciph_msg:') && 
+                      payload?.includes(':handshake:')) ||
+                     (content?.startsWith('ciph_msg:') && 
+                      content?.includes(':handshake:'));
 
-  const [decryptedContent, setDecryptedContent] = useState<string>("");
-  const [decryptionError, setDecryptionError] = useState<string>("");
-  const [isDecrypting, setIsDecrypting] = useState<boolean>(false);
-  const [decryptionAttempted, setDecryptionAttempted] = useState<boolean>(false);
+  // Get conversation if it's a handshake
+  const conversation = isHandshake ? (() => {
+    try {
+      // Parse the handshake payload using the same method as ConversationManager
+      const handshakeMessage = payload?.startsWith('ciph_msg:') ? payload : content;
+      const parts = handshakeMessage.split(':');
+      if (parts.length < 4 || parts[0] !== 'ciph_msg' || parts[2] !== 'handshake') {
+        console.error('Invalid handshake payload format');
+        return null;
+      }
+
+      const jsonPart = parts.slice(3).join(':'); // Handle colons in JSON
+      const handshakePayload = JSON.parse(jsonPart);
+      
+      // Get all conversations
+      const conversations = [
+        ...(messagingStore.conversationManager?.getActiveConversations() || []),
+        ...(messagingStore.conversationManager?.getPendingConversations() || [])
+      ];
+
+      // First try to find by conversation ID
+      let foundConversation = conversations.find(c => c.conversationId === handshakePayload.conversationId);
+      
+      // If not found by ID, try to find by address
+      if (!foundConversation) {
+        foundConversation = conversations.find(c => 
+          c.kaspaAddress === senderAddress || c.kaspaAddress === recipientAddress
+        );
+      }
+
+      console.log('Found conversation:', foundConversation);
+      return foundConversation;
+    } catch (error) {
+      console.error('Error parsing handshake payload:', error);
+      return null;
+    }
+  })() : null;
+
+  // Get the correct explorer URL based on network
+  const getExplorerUrl = (txId: string) => {
+    return walletStore.selectedNetwork === "mainnet" 
+      ? `https://explorer.kaspa.org/txs/${txId}`
+      : `https://explorer-tn10.kaspa.org/txs/${txId}`;
+  };
+
+  // Format amount or fee for display
+  const formatAmountAndFee = () => {
+    if (isOutgoing && fee !== undefined) {
+      return (
+        <div className="message-transaction-info">
+          <div className="message-fee">Fee: {fee.toFixed(8)} KAS</div>
+        </div>
+      );
+    }
+    return null;  // Don't show amount for any messages
+  };
 
   // Parse and render message content
   const renderMessageContent = () => {
+    // If this is a handshake message and we found the conversation
+    if (isHandshake && conversation) {
+      // Only show handshake response UI if:
+      // 1. The conversation is pending
+      // 2. We didn't initiate it
+      // 3. It hasn't been responded to yet
+      if (conversation.status === 'pending' && !conversation.initiatedByMe) {
+        console.log('Rendering handshake response for conversation:', conversation);
+        return <HandshakeResponse conversation={conversation} />;
+      }
+      // For other handshake messages, just show the status text
+      return conversation.status === 'active' 
+        ? 'Handshake completed' 
+        : conversation.initiatedByMe 
+          ? 'Handshake sent' 
+          : 'Handshake received';
+    }
+
     // Wait for decryption attempt before showing content
     if (isDecrypting) {
       return <div className="decrypting">Decrypting message...</div>;
@@ -111,9 +184,28 @@ export const MessageDisplay: FC<MessageDisplayProps> = ({
     return messageToRender;
   };
 
+  const [decryptedContent, setDecryptedContent] = useState<string>("");
+  const [decryptionError, setDecryptionError] = useState<string>("");
+  const [isDecrypting, setIsDecrypting] = useState<boolean>(false);
+  const [decryptionAttempted, setDecryptionAttempted] = useState<boolean>(false);
+
   useEffect(() => {
     const decryptMessage = async () => {
-      if (!mounted.current || !payload || !walletStore.unlockedWallet) {
+      if (!mounted.current || !walletStore.unlockedWallet) {
+        setDecryptionAttempted(true);
+        return;
+      }
+
+      // If we already have decrypted content from the account service, use that
+      if (content) {
+        setDecryptedContent(content);
+        setDecryptionError("");
+        setDecryptionAttempted(true);
+        return;
+      }
+
+      // Only attempt decryption if we don't have pre-decrypted content
+      if (!payload) {
         setDecryptionAttempted(true);
         return;
       }
@@ -179,10 +271,9 @@ export const MessageDisplay: FC<MessageDisplayProps> = ({
           }
         }
       } catch (error) {
+        console.error("Error decrypting message:", error);
         if (mounted.current) {
-          const decoded = decodePayload(payload);
-          setDecryptedContent(decoded || "");
-          setDecryptionError((error as Error).message || "Failed to decrypt message");
+          setDecryptionError(error instanceof Error ? error.message : "Unknown error");
         }
       } finally {
         if (mounted.current) {
@@ -192,60 +283,34 @@ export const MessageDisplay: FC<MessageDisplayProps> = ({
       }
     };
 
-    // Reset states when message changes
-    setDecryptedContent("");
-    setDecryptionError("");
-    setIsDecrypting(false);
-    setDecryptionAttempted(false);
-
-    // Start decryption
     decryptMessage();
+  }, [payload, walletStore.unlockedWallet, content]);
 
-    // Cleanup function
-    return () => {
-      mounted.current = false;
-    };
-  }, [payload, walletStore.unlockedWallet, transactionId, senderAddress, timestamp]);
-
-  // Set mounted ref on component mount
   useEffect(() => {
-    mounted.current = true;
     return () => {
       mounted.current = false;
     };
   }, []);
 
-  // Add debug log for render
-  console.log("MessageDisplay: Rendering message", {
-    transactionId,
-    content,
-    decryptedContent,
-    finalContent: decryptedContent || content,
-    isOutgoing,
-    senderAddress,
-    recipientAddress
-  });
-
   return (
     <div className={`message ${isOutgoing ? "outgoing" : "incoming"}`}>
       <div className="message-header">
-        <span className="message-from">
-          {isOutgoing ? "To" : "From"}: {shortDisplayAddress}
-        </span>
-        <span className="message-time">
-          {timestamp ? new Date(timestamp).toLocaleString() : "Pending"}
-        </span>
+        <div className="message-timestamp">
+          {new Date(timestamp).toLocaleString()}
+        </div>
       </div>
-      <div className="message-content">
-        {renderMessageContent()}
-      </div>
+      <div className="message-content">{renderMessageContent()}</div>
       <div className="message-footer">
-        <span className="message-id">
-          <span className="tx-label">TX: </span>
-          <span className="tx-value">{transactionId || "Pending..."}</span>
-        </span>
-        {amount > 0 && (
-          <span className="message-amount">{formatKasAmount(amount, true)} KAS</span>
+        {formatAmountAndFee()}
+        {transactionId && (
+          <a
+            href={getExplorerUrl(transactionId)}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="transaction-link"
+          >
+            View Transaction
+          </a>
         )}
       </div>
     </div>

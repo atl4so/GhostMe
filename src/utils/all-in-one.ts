@@ -142,8 +142,8 @@ export async function fetchKasplexData(daaScore: string) {
 // Helper function to fetch address transactions
 export async function fetchAddressTransactions(address: string) {
   try {
-    // Remove the kaspatest: prefix and extract just the address part
-    const cleanAddress = address.replace("kaspatest:", "");
+    // Remove the kaspa: or kaspatest: prefix and extract just the address part
+    const cleanAddress = address.replace(/^(kaspa:|kaspatest:)/, "");
 
     // First get all UTXOs
     const apiEndpoints = [
@@ -153,13 +153,16 @@ export async function fetchAddressTransactions(address: string) {
     ];
 
     let utxoData = null;
+    let successfulEndpoint = null;
+
     for (const baseUrl of apiEndpoints) {
       try {
         const response = await fetch(
-          `${baseUrl}/info/utxos/address/${cleanAddress}`
+          `${baseUrl}/addresses/${cleanAddress}/utxos`
         );
         if (response.ok) {
           utxoData = await response.json();
+          successfulEndpoint = baseUrl;
           break;
         }
       } catch (error) {
@@ -168,7 +171,7 @@ export async function fetchAddressTransactions(address: string) {
       }
     }
 
-    if (!utxoData) {
+    if (!utxoData || !successfulEndpoint) {
       throw new Error("Failed to fetch UTXOs from all endpoints");
     }
 
@@ -189,12 +192,23 @@ export async function fetchAddressTransactions(address: string) {
       );
     }
 
-    // Fetch full details for each transaction
+    // Fetch full details for each transaction using the successful endpoint
     const transactions = {
       transactions: await Promise.all(
         Array.from(txIds).map(async (txId: string) => {
-          const txDetails = await fetchTransactionDetails(txId);
-          return txDetails;
+          try {
+            const response = await fetch(
+              `${successfulEndpoint}/transactions/${txId}`
+            );
+            if (!response.ok) {
+              console.warn(`Failed to fetch transaction ${txId}`);
+              return null;
+            }
+            return await response.json();
+          } catch (error) {
+            console.warn(`Error fetching transaction ${txId}:`, error);
+            return null;
+          }
         })
       ).then((txs) => txs.filter((tx) => tx !== null)),
     };

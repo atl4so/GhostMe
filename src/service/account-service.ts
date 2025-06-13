@@ -17,12 +17,16 @@ import {
   IBlockAdded,
   ITransaction,
   NetworkType,
+  Transaction,
+  calculateTransactionMass,
 } from "kaspa-wasm";
 import { KaspaClient, decodePayload } from "../utils/all-in-one";
 import { UnlockedWallet, WalletStorage } from "../utils/wallet-storage";
 import EventEmitter from "eventemitter3";
 import { encrypt_message } from "cipher";
 import { CipherHelper } from "../utils/cipher-helper";
+import { create } from "zustand";
+import { useMessagingStore } from "../store/messaging.store";
 
 // Message related types
 type DecodedMessage = {
@@ -60,6 +64,8 @@ type CreateTransactionArgs = {
   address: Address;
   amount: bigint;
   payload: string;
+  payloadSize?: number;
+  messageLength?: number;
 };
 
 type SendMessageArgs = {
@@ -68,11 +74,29 @@ type SendMessageArgs = {
   password: string;
 };
 
+type SendMessageWithContextArgs = {
+  toAddress: Address;
+  message: string;
+  password: string;
+  theirAlias: string;
+};
+
 // Add this helper function at the top level
 function stringifyWithBigInt(obj: any): string {
   return JSON.stringify(obj, (_, value) => 
     typeof value === 'bigint' ? value.toString() : value
   );
+}
+
+interface Conversation {
+  conversationId: string;
+  myAlias: string;
+  theirAlias: string;
+  kaspaAddress: string;
+  status: string;
+  createdAt: number;
+  lastActivity: number;
+  initiatedByMe: boolean;
 }
 
 export class AccountService extends EventEmitter<AccountServiceEvents> {
@@ -85,12 +109,16 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
   receiveAddress: Address | null = null;
 
   private processedMessageIds: Set<string> = new Set();
+  private monitoredConversations: Set<string> = new Set(); // Store monitored aliases
+  private monitoredAddresses: Map<string, string> = new Map(); // Store address -> alias mappings
   private readonly MESSAGE_PREFIX_HEX = "636970685f6d73673a"; // "ciph_msg:" in hex
   private readonly MAX_PROCESSED_MESSAGES = 1000; // Prevent unlimited growth
-  private readonly MESSAGE_AMOUNT = BigInt(10000000); // 0.1 KAS in sompi
 
   // Add password field
   private password: string | null = null;
+
+  private conversations: Conversation[] = [];
+  private conversationsLoaded = false;
 
   constructor(
     private readonly rpcClient: KaspaClient,
@@ -208,7 +236,8 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
 
       // Use the network-appropriate API endpoint
       const baseUrl = this.networkId === 'mainnet' ? 'https://api.kaspa.org' : 'https://api-tn10.kaspa.org';
-      const response = await fetch(`${baseUrl}/addresses/${address}/transactions`);
+      const encodedAddress = encodeURIComponent(address);
+      const response = await fetch(`${baseUrl}/addresses/${encodedAddress}/full-transactions-page?limit=50&before=0&after=0&resolve_previous_outpoints=no`);
       
       if (!response.ok) {
         throw new Error(`Failed to fetch historical transactions: ${response.statusText}`);
@@ -325,34 +354,7 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
 
       // Set up block subscription with optimized message handling
       console.log("Setting up block subscription...");
-      await this.rpcClient.subscribeToBlockAdded(async (event) => {
-        try {
-          console.log("Processing block event:", stringifyWithBigInt(event));
-          
-          const blockTime = Number(event?.data?.block?.header?.timestamp) || Date.now();
-          const blockHash = event?.data?.block?.header?.hash;
-          
-          // Process transactions if they exist
-          const transactions = event?.data?.block?.transactions || [];
-          
-          for (const tx of transactions) {
-            const txId = tx.verboseData?.transactionId;
-            if (!txId) continue; // Skip if no transaction ID
-            
-            // Skip if we've already processed this message
-            if (this.processedMessageIds.has(txId)) {
-              continue;
-            }
-
-            // Check if this is a message transaction and involves our address
-            if (this.isMessageTransaction(tx) && this.isTransactionForUs(tx)) {
-              await this.processMessageTransaction(tx, blockHash || txId, blockTime);
-            }
-          }
-        } catch (error) {
-          console.error("Error processing block event:", error);
-        }
-      });
+      await this.rpcClient.subscribeToBlockAdded(this.processBlockEvent.bind(this));
       console.log("Successfully subscribed to block events");
 
       // Fetch historical messages after setup is complete
@@ -385,13 +387,29 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
   public async createTransaction(
     transaction: CreateTransactionArgs,
     password: string
-  ) {
+  ): Promise<string> {
     if (!this.isStarted || !this.rpcClient.rpc) {
       throw new Error("Account service is not started");
     }
 
+    if (!this.receiveAddress) {
+      throw new Error("Receive address not initialized");
+    }
+
+    if (!transaction.address) {
+      throw new Error("Transaction address is required");
+    }
+
+    if (!transaction.amount) {
+      throw new Error("Transaction amount is required");
+    }
+
+    if (!transaction.payload) {
+      throw new Error("Transaction payload is required");
+    }
+
     console.log("=== CREATING TRANSACTION ===");
-    const primaryAddress = this.receiveAddress!;
+    const primaryAddress = this.receiveAddress;
     console.log("Creating transaction from primary address:", primaryAddress.toString());
     console.log("Change will go back to primary address:", primaryAddress.toString());
     console.log(`Destination: ${transaction.address.toString()}`);
@@ -403,34 +421,31 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
       password
     );
 
+    if (!privateKeyGenerator) {
+      throw new Error("Failed to generate private key");
+    }
+
     // Ensure the destination address has the proper prefix
     const destinationAddress = this.ensureAddressPrefix(transaction.address);
 
-    const paymentOutput = new PaymentOutput(
-      destinationAddress,
-      transaction.amount
-    );
-
-    const generator = new Generator({
-      changeAddress: primaryAddress, // Use primary address for change
-      entries: this.context,
-      outputs: [paymentOutput],
-      payload: transaction.payload,
-      priorityFee: BigInt(0),
-      networkId: this.networkId,
-    });
+    if (!this.context) {
+      throw new Error("UTXO context not initialized");
+    }
 
     try {
+      // Use our optimized generator creation method
+      const generator = this._getGeneratorForTransaction(transaction);
+
       console.log("Generating transaction...");
       const pendingTransaction: PendingTransaction | null =
         await generator.next();
 
-      if ((await generator.next()) !== null) {
-        throw new Error("Unexpected multiple transaction generation");
+      if (!pendingTransaction) {
+        throw new Error("Failed to generate transaction");
       }
 
-      if (!pendingTransaction) {
-        throw new Error("should not happens");
+      if ((await generator.next()) !== null) {
+        throw new Error("Unexpected multiple transaction generation");
       }
 
       // Log the addresses that need signing
@@ -445,7 +460,11 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
         .addresses()
         .map(() => {
           console.log("Using primary address key for signing");
-          return privateKeyGenerator.receiveKey(0);
+          const key = privateKeyGenerator.receiveKey(0);
+          if (!key) {
+            throw new Error("Failed to generate private key for signing");
+          }
+          return key;
         });
 
       // Sign the transaction
@@ -454,13 +473,13 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
 
       // Submit the transaction
       console.log("Submitting transaction to network...");
-      const txId = await pendingTransaction.submit(this.rpcClient.rpc);
+      const txId: string = await pendingTransaction.submit(this.rpcClient.rpc);
       console.log(`Transaction submitted with ID: ${txId}`);
       console.log("========================");
 
       return txId;
     } catch (error) {
-      console.error(error);
+      console.error("Error creating transaction:", error);
       throw error;
     }
   }
@@ -473,35 +492,115 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
     return this._getGeneratorForTransaction(transaction).estimate();
   }
 
-  public async estimateTransactionDetails(transaction: CreateTransactionArgs) {
-    if (!this.isStarted) {
-      throw new Error("Account service is not started");
-    }
-
+  // Add method to load conversations
+  private async loadConversations(): Promise<void> {
     try {
-      if (!transaction || !transaction.address) {
-        throw new Error("Invalid transaction or address");
+      // If conversations are already loaded and we have some, return
+      if (this.conversationsLoaded && this.conversations.length > 0) {
+        return;
       }
       
-      const availableUtxos = this.context.getMatureRange(0, this.context.matureLength);
+      // Maximum number of retries
+      const maxRetries = 10;
+      let retries = 0;
       
-      const generator = new Generator({
-        changeAddress: this.receiveAddress!,
-        entries: this.context,
-        outputs: [new PaymentOutput(transaction.address, transaction.amount)],
-        payload: transaction.payload,
-        priorityFee: BigInt(0),
-        networkId: this.networkId,
+      while (!this.conversationsLoaded && retries < maxRetries) {
+        // Wait for conversations to load
+        await new Promise(resolve => setTimeout(resolve, 100));
+        
+        // Check if we have conversations
+        if (this.conversations && this.conversations.length > 0) {
+          this.conversationsLoaded = true;
+          console.log("Conversations loaded:", this.conversations.length);
+          break;
+        }
+        
+        retries++;
+        console.log("Waiting for conversations... attempt", retries);
+      }
+      
+      // If we still don't have conversations, log a warning but continue
+      if (!this.conversationsLoaded) {
+        console.warn("Could not load conversations after maximum retries");
+        // Set loaded to true anyway to prevent further retries
+        this.conversationsLoaded = true;
+      }
+    } catch (error) {
+      console.error("Error loading conversations:", error);
+      // Set loaded to true to prevent further retries
+      this.conversationsLoaded = true;
+    }
+  }
+
+  public async estimateTransactionDetails(transaction: CreateTransactionArgs): Promise<{
+    fees: number;
+    finalAmount: number;
+    transactions: number;
+    utxos: number;
+  }> {
+    try {
+      const summary = await this.estimateTransaction(transaction);
+      if (!summary) {
+        throw new Error("Failed to get transaction summary");
+      }
+
+      // Base transaction components
+      const baseTransactionMass = 200;  // Base transaction overhead
+      const inputMass = 165;  // Per input mass (including signature)
+      const outputMass = 35;   // Per output mass
+      const sigOpMass = 1000;  // Mass per signature operation
+      
+      const numInputs = summary.utxos || 1;
+      const numOutputs = 1; // Always 1 output since all messages are self-messages
+      const numSigOps = numInputs; // One signature operation per input
+
+      // Use provided payload size or calculate from hex
+      const payloadSize = transaction.payloadSize || (() => {
+        const payloadHex = transaction.payload || '';
+        return Math.ceil(payloadHex.length / 2); // Convert hex to bytes
+      })();
+
+      // Calculate compute mass
+      const computeMass = Math.floor(  // Ensure integer mass
+        baseTransactionMass + 
+        (inputMass * numInputs) + 
+        (outputMass * numOutputs) + 
+        (sigOpMass * numSigOps) +
+        payloadSize
+      );
+
+      // Calculate storage mass based on KIP-0009
+      // For our messaging transactions, we're always within the safe limits:
+      // - We use 1-2 outputs max
+      // - Our amounts are above 0.02 KAS
+      // So storage mass won't be the limiting factor
+      const storageMass = computeMass;
+
+      // Network mass is the max of compute and storage mass
+      const networkMass = Math.floor(Math.max(computeMass, storageMass)); // Ensure integer mass
+      
+      // Final fee is 1 sompi per gram of mass
+      const fees = networkMass;
+      
+      console.log("Transaction mass calculation:", {
+        baseTransactionMass,
+        inputMassTotal: inputMass * numInputs,
+        outputMassTotal: outputMass * numOutputs,
+        sigOpMassTotal: sigOpMass * numSigOps,
+        payloadSize,
+        computeMass,
+        storageMass,
+        networkMass,
+        numInputs,
+        numOutputs,
+        numSigOps,
+        payloadHex: transaction.payload?.substring(0, 50) + "...", // Log first part of payload for debugging
+        // Log the full payload for debugging
+        fullPayload: transaction.payload
       });
       
-      const summary = await generator.estimate();
-      
-      if (!summary || !summary.fees) {
-        throw new Error("Estimation returned invalid result");
-      }
-      
       const result = {
-        fees: Number(summary.fees) / 100000000,
+        fees: fees / 100000000, // Convert to KAS
         finalAmount: Number(summary.finalAmount) / 100000000,
         transactions: summary.transactions,
         utxos: summary.utxos
@@ -514,7 +613,12 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
     }
   }
 
-  public async estimateSendMessage(sendMessage: SendMessageArgs) {
+  public async estimateSendMessage(sendMessage: SendMessageArgs): Promise<{
+    fees: number;
+    finalAmount: number;
+    transactions: number;
+    utxos: number;
+  }> {
     try {
       const minimumAmount = kaspaToSompi("0.1");
 
@@ -522,24 +626,187 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
         throw new Error("Minimum amount missing");
       }
 
-      // Encrypt the message
+      // Log original message details
+      const originalMessageBytes = new TextEncoder().encode(sendMessage.message).length;
+      console.log("Original message details:", {
+        message: sendMessage.message,
+        length: sendMessage.message.length,
+        bytes: originalMessageBytes
+      });
+
+      // Encrypt the message to get actual encrypted length
       const encryptedMessage = encrypt_message(
         sendMessage.toAddress.toString(),
         sendMessage.message
       );
 
-      const prefix = "ciph_msg:"
+      // Create the full payload with all protocol components
+      const protocolPrefix = "ciph_msg:1:comm:"; // 13 bytes
+      const alias = "f74137627867"; // Fixed 13 bytes
+      const separator = ":"; // 1 byte
+      const encryptedHex = encryptedMessage.to_hex();
+      
+      // Calculate actual byte sizes (not hex lengths)
+      const protocolPrefixBytes = 13; // Fixed size from actual transaction
+      const aliasBytes = 13; // Fixed size from actual transaction
+      const separatorBytes = 1; // Fixed size from actual transaction
+      
+      // Calculate encryption overhead dynamically
+      // Base overhead: 360 bytes (from previous transaction)
+      // Additional overhead: ~2 bytes per message byte (from comparing transactions)
+      // Fixed overhead: 12 bytes (from comparing actual transactions)
+      const baseEncryptionOverhead = 360;
+      const perByteOverhead = 2;
+      const fixedOverhead = 12;
+      const encryptedBytes = baseEncryptionOverhead + (originalMessageBytes * perByteOverhead) - fixedOverhead;
+      
+      const totalPayloadBytes = protocolPrefixBytes + aliasBytes + separatorBytes + encryptedBytes;
+
+      // Create the full payload hex
+      const prefix = "ciph_msg:1:comm:"
+        .split("")
+        .map((c) => c.charCodeAt(0).toString(16).padStart(2, "0"))
+        .join("");
+      
+      const aliasHex = alias
+        .split("")
+        .map((c) => c.charCodeAt(0).toString(16).padStart(2, "0"))
+        .join("");
+      
+      const separatorHex = ":"
         .split("")
         .map((c) => c.charCodeAt(0).toString(16).padStart(2, "0"))
         .join("");
 
-      const payload = prefix + encryptedMessage.to_hex();
+      const payload = prefix + aliasHex + separatorHex + encryptedHex;
+      
+      // Calculate the actual mass
+      const baseTransactionMass = 200;  // Base transaction overhead
+      const inputMass = 165;  // Per input mass (including signature)
+      const outputMass = 35;   // Per output mass
+      const sigOpMass = 1000;  // Mass per signature operation
+      
+      const numInputs = 1;
+      const numOutputs = 1;
+      const numSigOps = 1;
+
+      // Calculate compute mass using actual byte sizes
+      const computeMass = Math.floor(  // Ensure integer mass
+        baseTransactionMass + 
+        (inputMass * numInputs) + 
+        (outputMass * numOutputs) + 
+        (sigOpMass * numSigOps) +
+        totalPayloadBytes
+      );
+
+      // Calculate storage mass based on KIP-0009
+      const storageMass = computeMass;
+
+      // Network mass is the max of compute and storage mass
+      const networkMass = Math.floor(Math.max(computeMass, storageMass)); // Ensure integer mass
+      
+      // Final fee is 1 sompi per gram of mass
+      const fees = networkMass;
+      
+      // Log detailed encryption overhead
+      console.log("Encryption overhead breakdown:", {
+        originalMessage: {
+          text: sendMessage.message,
+          length: sendMessage.message.length,
+          bytes: originalMessageBytes
+        },
+        encryptedMessage: {
+          hex: encryptedHex,
+          hexLength: encryptedHex.length,
+          bytes: encryptedBytes,
+          overhead: encryptedBytes - originalMessageBytes,
+          breakdown: {
+            baseOverhead: baseEncryptionOverhead,
+            perByteOverhead: perByteOverhead,
+            messageOverhead: originalMessageBytes * perByteOverhead,
+            fixedOverhead: fixedOverhead,
+            totalOverhead: baseEncryptionOverhead + (originalMessageBytes * perByteOverhead) - fixedOverhead
+          }
+        },
+        protocolComponents: {
+          prefix: {
+            text: "ciph_msg:1:comm:",
+            bytes: protocolPrefixBytes,
+            hex: prefix,
+            hexLength: prefix.length
+          },
+          alias: {
+            text: alias,
+            bytes: aliasBytes,
+            hex: aliasHex,
+            hexLength: aliasHex.length
+          },
+          separator: {
+            text: ":",
+            bytes: separatorBytes,
+            hex: separatorHex,
+            hexLength: separatorHex.length
+          }
+        },
+        totalPayload: {
+          bytes: totalPayloadBytes,
+          hex: payload,
+          hexLength: payload.length,
+          breakdown: {
+            protocolPrefix: protocolPrefixBytes,
+            alias: aliasBytes,
+            separator: separatorBytes,
+            encryptedMessage: encryptedBytes
+          }
+        },
+        // Add hex encoding analysis
+        hexEncodingAnalysis: {
+          originalBytes: originalMessageBytes,
+          encryptedBytes: encryptedBytes,
+          protocolBytes: protocolPrefixBytes + aliasBytes + separatorBytes,
+          totalBytes: totalPayloadBytes,
+          hexMultiplier: 2, // Each byte becomes 2 hex characters
+          expectedHexLength: totalPayloadBytes * 2,
+          // Add reference to actual transaction
+          actualTransaction: {
+            protocolPrefix: "ciph_msg:1:comm:",
+            alias: "f74137627867",
+            separator: ":",
+            totalBytes: 379, // From actual transaction
+            hexLength: 758,  // From actual transaction
+            computeMass: 1791,
+            fee: 0.00001791
+          }
+        }
+      });
+      
+      // Log mass calculation
+      console.log("Mass calculation:", {
+        baseTransactionMass,
+        inputMassTotal: inputMass * numInputs,
+        outputMassTotal: outputMass * numOutputs,
+        sigOpMassTotal: sigOpMass * numSigOps,
+        payloadSize: totalPayloadBytes,
+        computeMass,
+        storageMass,
+        networkMass,
+        numInputs,
+        numOutputs,
+        numSigOps,
+        finalFee: fees / 100000000, // Convert to KAS
+        // Add reference to actual transaction
+        actualTransaction: {
+          computeMass: 1791,
+          fee: 0.00001791
+        }
+      });
       
       // Use a direct approach, minimizing string operations on addresses
       return this.estimateTransactionDetails({
         address: sendMessage.toAddress,
-        amount: this.MESSAGE_AMOUNT,
+        amount: minimumAmount,
         payload: payload,
+        payloadSize: totalPayloadBytes
       });
     } catch (error) {
       console.error("Error in estimateSendMessage:", error);
@@ -547,37 +814,72 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
     }
   }
 
-  public async sendMessage(sendMessage: SendMessageArgs) {
+  public async sendMessage(sendMessage: SendMessageArgs): Promise<string> {
     this.ensurePasswordSet();
+    const minimumAmount = kaspaToSompi("0.1");
+
+    if (!minimumAmount) {
+      throw new Error("Minimum amount missing");
+    }
+
+    if (!sendMessage.toAddress) {
+      throw new Error("Destination address is required");
+    }
+
+    if (!sendMessage.message) {
+      throw new Error("Message is required");
+    }
+
+    if (!sendMessage.password) {
+      throw new Error("Password is required");
+    }
 
     const destinationAddress = this.ensureAddressPrefix(sendMessage.toAddress);
-    
     const addressString = destinationAddress.toString();
     
-    const encryptedMessage = encrypt_message(
-      addressString,
-      sendMessage.message
-    );
+    // Check if the message is already encrypted (hex format)
+    const isPreEncrypted = /^[0-9a-fA-F]+$/.test(sendMessage.message);
     
-    const encryptedHex = encryptedMessage.to_hex();
+    let payload;
+    if (isPreEncrypted) {
+      // Message is already encrypted, just add the prefix
+      const prefix = "ciph_msg:"
+        .split("")
+        .map((c) => c.charCodeAt(0).toString(16).padStart(2, "0"))
+        .join("");
+      payload = prefix + sendMessage.message;
+    } else {
+      // Message needs to be encrypted
+      const encryptedMessage = encrypt_message(addressString, sendMessage.message);
+      if (!encryptedMessage) {
+        throw new Error("Failed to encrypt message");
+      }
+      const prefix = "ciph_msg:"
+        .split("")
+        .map((c) => c.charCodeAt(0).toString(16).padStart(2, "0"))
+        .join("");
+      payload = prefix + encryptedMessage.to_hex();
+    }
 
-    const prefix = "ciph_msg:"
-      .split("")
-      .map((c) => c.charCodeAt(0).toString(16).padStart(2, "0"))
-      .join("");
-    
-    const payload = prefix + encryptedHex;
+    if (!payload) {
+      throw new Error("Failed to create message payload");
+    }
 
-    const txId = await this.createTransaction(
-      {
-        address: destinationAddress,
-        amount: this.MESSAGE_AMOUNT,
-        payload: payload,
-      },
-      sendMessage.password
-    );
+    try {
+      const txId = await this.createTransaction(
+        {
+          address: destinationAddress,
+          amount: minimumAmount,
+          payload: payload,
+        },
+        sendMessage.password
+      );
     
-    return txId;
+      return txId;
+    } catch (error) {
+      console.error("Error sending message:", error);
+      throw error;
+    }
   }
 
   /**
@@ -621,6 +923,12 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
     preEncryptedHex: string, 
     password: string
   ) {
+    const minimumAmount = kaspaToSompi("0.1");
+
+    if (!minimumAmount) {
+      throw new Error("Minimum amount missing");
+    }
+    
     // Ensure the destination address has the proper prefix
     const destinationAddress = this.ensureAddressPrefix(toAddress);
     console.log("Sending pre-encrypted message to:", destinationAddress.toString());
@@ -641,7 +949,7 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
     return this.createTransaction(
       {
         address: destinationAddress,
-        amount: this.MESSAGE_AMOUNT,
+        amount: minimumAmount,
         payload: payload,
       },
       password
@@ -694,21 +1002,45 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
     console.log("Using destination address:", destinationAddress.toString());
     console.log("Using primary address for change:", primaryAddress.toString());
 
+    // Check if this is a direct self-message (sending to our own receive address)
+    const isDirectSelfMessage = destinationAddress.toString() === this.receiveAddress?.toString();
+    
+    // Check if we have an active conversation with this address
+    const messagingStore = useMessagingStore.getState();
+    const conversationManager = messagingStore?.conversationManager;
+    let hasActiveConversation = false;
+    
+    if (conversationManager) {
+      const conversations = conversationManager.getMonitoredConversations();
+      hasActiveConversation = conversations.some(conv => 
+        conv.address === destinationAddress.toString()
+      );
+      console.log("Active conversation check:", {
+        destinationAddress: destinationAddress.toString(),
+        hasActiveConversation,
+        conversations: conversations
+      });
+    }
+    
+    // Treat as self-message if either direct self-message or has active conversation
+    const isSelfMessage = isDirectSelfMessage || hasActiveConversation;
+    console.log("Transaction type:", {
+      isDirectSelfMessage,
+      hasActiveConversation,
+      isSelfMessage
+    });
+    
+    // For self-messages or active conversations, use receive address as both change and destination
     return new Generator({
-      changeAddress: primaryAddress,
+      // For self-messages, use receive address as both change and destination
+      changeAddress: isSelfMessage ? destinationAddress : primaryAddress,
       entries: this.context,
-      outputs: [new PaymentOutput(destinationAddress, transaction.amount)],
+      // For self-messages, use empty array to only use change output
+      outputs: isSelfMessage ? [] : [new PaymentOutput(destinationAddress, transaction.amount)],
       payload: transaction.payload,
       networkId: this.networkId,
       priorityFee: BigInt(0),
     });
-  }
-
-  private getOutputAddress(output: any): string | null {
-    return output?.scriptPublicKey?.verboseData?.scriptPublicKeyAddress ||
-           output?.verboseData?.scriptPublicKeyAddress ||
-           output?.scriptPublicKeyAddress ||
-           null;
   }
 
   private isMessageTransaction(tx: ITransaction): boolean {
@@ -722,232 +1054,297 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
         return; // Skip if no txId or already processed
       }
 
-      // Log raw transaction for debugging
-      console.log("Processing message transaction:", {
-        txId,
-        hasInputs: !!tx.inputs?.length,
-        numInputs: tx.inputs?.length,
-        hasOutputs: !!tx.outputs?.length,
-        numOutputs: tx.outputs?.length,
-        payload: tx.payload?.substring(0, 50) + "..."
-      });
+      // Map to store transaction outputs for this block
+      const txOutputsMap = new Map<string, any[]>();
 
-      // Get sender and recipient from the transaction
-      let sender = "Unknown";
-      let recipient = "Unknown";
-      
-      if (tx.outputs && tx.outputs.length > 0) {
-        // Log all outputs for debugging
-        console.log("Transaction outputs:", tx.outputs.map((output: any) => ({
-          value: typeof output.value === 'bigint' ? output.value.toString() : output.value,
-          address: this.getOutputAddress(output),
-          hasScriptPubKey: !!output.scriptPublicKey,
-          hasVerboseData: !!output.scriptPublicKey?.verboseData
-        })));
+      // Get sender address from transaction inputs
+      let senderAddress = null;
+      if (tx.inputs && tx.inputs.length > 0) {
+        const input = tx.inputs[0];
+        const prevTxId = input.previousOutpoint?.transactionId;
+        const prevOutputIndex = input.previousOutpoint?.index;
         
-        // First find the message output (0.1 KAS)
-        const messageOutput = tx.outputs.find((output: any) => {
-          const value = typeof output.value === 'bigint' ? output.value : BigInt(output.value || 0);
-          const isMessageOutput = value === this.MESSAGE_AMOUNT;
-          console.log("Checking output for message:", {
-            value: value.toString(),
-            messageAmount: this.MESSAGE_AMOUNT.toString(),
-            isMessageOutput,
-            address: this.getOutputAddress(output)
-          });
-          return isMessageOutput;
-        });
-
-        // Get recipient from message output
-        if (messageOutput) {
-          const messageAddress = this.getOutputAddress(messageOutput);
-          if (messageAddress) {
-            recipient = messageAddress;
-            console.log(`Found message recipient: ${recipient}`);
-          } else {
-            console.log("Could not find recipient address in message output:", messageOutput);
-          }
-        }
-
-        // Find change output (any output that's not the message output)
-        const changeOutput = tx.outputs.find((output: any) => {
-          const value = typeof output.value === 'bigint' ? output.value : BigInt(output.value || 0);
-          const address = this.getOutputAddress(output);
-          const isChangeOutput = value !== this.MESSAGE_AMOUNT && address && address !== recipient;
-          console.log("Checking output for change:", {
-            value: value.toString(),
-            address,
-            recipientAddress: recipient,
-            isChangeOutput
-          });
-          return isChangeOutput;
-        });
-
-        if (changeOutput) {
-          const changeAddress = this.getOutputAddress(changeOutput);
-          if (changeAddress) {
-            sender = changeAddress;
-            console.log(`Found sender from change output: ${sender}`);
-          } else {
-            console.log("Could not find sender address in change output:", changeOutput);
-          }
-        }
-
-        // If we couldn't get sender from change output, try inputs as fallback
-        if (sender === "Unknown" && tx.inputs && tx.inputs.length > 0) {
-          console.log("Trying to find sender from inputs:", tx.inputs.map((input: any) => ({
-            hasOutpoint: !!input.previousOutpoint,
-            outpointAddress: input.previousOutpoint?.verboseData?.scriptPublicKeyAddress,
-            verboseAddress: input.verboseData?.scriptPublicKeyAddress,
-            previousOutpointAddress: input.previous_outpoint_address,
-            rawInput: this.stringifyWithBigInt(input)
-          })));
-
-          const possibleSenderAddresses = tx.inputs
-            .map((input: any) => {
-              return [
-                input.previousOutpoint?.verboseData?.scriptPublicKeyAddress,
-                input.previousOutpoint?.scriptPublicKey?.verboseData?.scriptPublicKeyAddress,
-                input.verboseData?.scriptPublicKeyAddress,
-                input.scriptPublicKey?.verboseData?.scriptPublicKeyAddress,
-                input.previous_outpoint_address,
-                input.previousOutpoint?.address,
-                input.address
-              ].filter(Boolean);
-            })
-            .flat();
-
-          if (possibleSenderAddresses.length > 0) {
-            sender = possibleSenderAddresses[0];
-            console.log(`Found sender from input data: ${sender}`);
-          } else {
-            console.log("No sender addresses found in inputs:", this.stringifyWithBigInt(tx.inputs));
+        if (prevTxId && typeof prevOutputIndex === 'number') {
+          try {
+            // First try to get from the previous transaction in this block
+            const prevTxOutputs = txOutputsMap.get(prevTxId);
+            if (prevTxOutputs && prevTxOutputs[prevOutputIndex]) {
+              senderAddress = prevTxOutputs[prevOutputIndex].verboseData?.scriptPublicKeyAddress;
+            }
+            
+            // If not found in this block, try the API
+            if (!senderAddress) {
+              const prevTx = await this._fetchTransactionDetails(prevTxId);
+              if (prevTx?.outputs && prevTx.outputs[prevOutputIndex]) {
+                const output = prevTx.outputs[prevOutputIndex];
+                senderAddress = output.verboseData?.scriptPublicKeyAddress;
+              }
+            }
+          } catch (error) {
+            console.error("Error getting sender address:", error);
           }
         }
       }
 
+      // Get the recipient/output address from the outputs
+      let recipientAddress = null;
+      if (tx.outputs && tx.outputs.length > 0) {
+        // For optimized self-messages, there's only one output which is both recipient and sender
+        recipientAddress = tx.outputs[0].verboseData?.scriptPublicKeyAddress;
+      }
+
+      // If we still don't have a sender address and this isn't a self-message, try the change output
+      if (!senderAddress && tx.outputs && tx.outputs.length > 1) {
+        // The second output is typically the change address going back to sender
+        senderAddress = tx.outputs[1].verboseData?.scriptPublicKeyAddress;
+      }
+
       // Log final results
+      const isIncoming = recipientAddress === this.receiveAddress?.toString();
+      const isOutgoing = senderAddress === this.receiveAddress?.toString();
+      
       console.log("Message participants:", {
-        sender,
-        recipient,
+        senderAddress,
+        recipientAddress,
         myAddress: this.receiveAddress?.toString(),
         txId,
-        isIncoming: recipient === this.receiveAddress?.toString(),
-        isOutgoing: sender === this.receiveAddress?.toString()
+        isIncoming,
+        isOutgoing
       });
 
-      // Get amount from the message output
-      let amount = 0;
-      const messageOutput = tx.outputs?.find((o: any) => {
-        const value = typeof o.value === 'bigint' ? o.value : BigInt(o.value || 0);
-        return value === this.MESSAGE_AMOUNT;
-      });
-      if (messageOutput) {
-        amount = Number(messageOutput.value) / 100000000;
+      // Check if this is a monitored conversation
+      const messagingStore = useMessagingStore.getState();
+      const conversationManager = messagingStore?.conversationManager;
+      let conversationPartner = null;
+      
+      if (conversationManager) {
+        // Check both sender and recipient addresses for monitored conversations
+        if (senderAddress) {
+          const senderConv = conversationManager.getConversationByAddress(senderAddress);
+          if (senderConv) {
+            conversationPartner = senderAddress;
+          }
+        }
+        if (recipientAddress && !conversationPartner) {
+          const recipientConv = conversationManager.getConversationByAddress(recipientAddress);
+          if (recipientConv) {
+            conversationPartner = recipientAddress;
+          }
+        }
+      }
+
+      // For monitored conversations, always preserve the conversation partner's address
+      if (conversationPartner) {
+        if (isOutgoing) {
+          recipientAddress = conversationPartner;
+        } else {
+          senderAddress = conversationPartner;
+        }
+        console.log("Using conversation partner address:", conversationPartner);
       }
 
       // Check if this is a cipher message
       if (!tx.payload?.startsWith(this.MESSAGE_PREFIX_HEX)) {
-        console.log(`Skipping transaction ${txId} - not a cipher message`);
+        console.log(`Skipping transaction ${tx.verboseData?.transactionId} - not a cipher message`);
         return;
       }
 
-      // Ensure password is set before attempting decryption
+      // Try to decode and decrypt the payload first
       try {
-        this.ensurePasswordSet();
-      } catch (error: unknown) {
-        const errorMessage = error instanceof Error ? error.message : "Unknown error";
-        console.log(`Cannot decrypt message ${txId} - ${errorMessage}`);
-        return;
-      }
-
-      // Strip the prefix and get the encrypted hex
-      const encryptedHex = tx.payload.substring(this.MESSAGE_PREFIX_HEX.length);
-      
-      // Get private key for decryption
-      const privateKeyGenerator = WalletStorage.getPrivateKeyGenerator(
-        this.unlockedWallet,
-        this.password!
-      );
-      
-      let decryptedContent = "";
-      let decryptionSuccess = false;
-
-      // Try with receive key first
-      try {
-        const privateKey = privateKeyGenerator.receiveKey(0);
-        const result = await CipherHelper.tryDecrypt(encryptedHex, privateKey.toString(), txId);
-        decryptedContent = result;
-        decryptionSuccess = true;
-        console.log(`Successfully decrypted message with receive key`);
-      } catch (error) {
-        console.log(`Failed to decrypt with receive key:`, error);
-      }
-
-      // If not decrypted, try with change key
-      if (!decryptionSuccess) {
-        try {
-          const privateKey = privateKeyGenerator.changeKey(0);
-          const result = await CipherHelper.tryDecrypt(encryptedHex, privateKey.toString(), txId);
-          decryptedContent = result;
-          decryptionSuccess = true;
-          console.log(`Successfully decrypted message with change key`);
-        } catch (error) {
-          console.log(`Failed to decrypt with change key:`, error);
+        // First verify this is a message transaction by checking the prefix
+        if (!tx.payload.startsWith(this.MESSAGE_PREFIX_HEX)) {
+          return; // Skip this transaction
         }
-      }
 
-      if (!decryptionSuccess) {
-        console.log(`Could not decrypt message for transaction ${txId}`);
-        return;
-      }
+        // Ensure password is set before attempting decryption
+        try {
+          this.ensurePasswordSet();
+        } catch (error: unknown) {
+          const errorMessage = error instanceof Error ? error.message : "Unknown error";
+          console.log(`Cannot decrypt message ${tx.verboseData?.transactionId} - ${errorMessage}`);
+          return;
+        }
 
-      // Create message object that matches the UI's expected format
-      const message: DecodedMessage = {
-        transactionId: txId,
-        senderAddress: sender,
-        recipientAddress: recipient,
-        content: decryptedContent,
-        timestamp: blockTime,
-        amount,
-        payload: tx.payload
-      };
+        // Extract the raw message content after the prefix
+        const messageHex = tx.payload.substring(this.MESSAGE_PREFIX_HEX.length);
+        console.log("Processing message payload:", messageHex);
+        
+        // First check if this is a handshake message by looking at the hex prefix
+        const handshakePrefix = "313a68616e647368616b653a"; // "1:handshake:" in hex
+        const commPrefix = "313a636f6d6d3a"; // "1:comm:" in hex
+        
+        let messageType = 'unknown';
+        let isHandshake = false;
+        let targetAlias = null;
+        let encryptedHex = messageHex;  // Default to full message
+        
+        // Check for handshake first - if it is, don't try to parse as string
+        if (messageHex.startsWith(handshakePrefix)) {
+          messageType = 'handshake';
+          isHandshake = true;
+          encryptedHex = messageHex;  // Keep the full message for handshake
+        } else if (messageHex.startsWith(commPrefix)) {
+          // Only try to parse as string for comm messages
+          const hexToString = (hex: string) => {
+            let str = '';
+            for (let i = 0; i < hex.length; i += 2) {
+              str += String.fromCharCode(parseInt(hex.substr(i, 2), 16));
+            }
+            return str;
+          };
 
-      // Track this message
-      this.processedMessageIds.add(txId);
-      
-      // Prevent unlimited growth of processed messages set
-      if (this.processedMessageIds.size > this.MAX_PROCESSED_MESSAGES) {
-        const idsArray = Array.from(this.processedMessageIds);
-        this.processedMessageIds = new Set(idsArray.slice(-this.MAX_PROCESSED_MESSAGES));
-      }
-
-      // Store the message in local storage
-      if (this.receiveAddress) {
-        const messagingStore = (window as any).messagingStore;
-        if (messagingStore) {
-          const myAddress = this.receiveAddress.toString();
+          const messageStr = hexToString(messageHex);
+          console.log("Parsed message string:", messageStr);
+          const parts = messageStr.split(':');
+          console.log("Message parts:", parts);
           
-          // Determine the other party in the conversation
-          const otherParty = sender === myAddress ? recipient : sender;
-          
-          // Store message under both addresses to ensure proper conversation grouping
-          messagingStore.storeMessage(message, myAddress);
-          messagingStore.storeMessage(message, otherParty);
-          
-          // Reload messages to update the UI
-          messagingStore.loadMessages(myAddress);
-          
-          // Set the opened recipient to ensure the conversation stays focused
-          if (messagingStore.openedRecipient === null) {
-            messagingStore.setOpenedRecipient(otherParty);
+          if (parts.length >= 4) {
+            messageType = 'comm';
+            targetAlias = parts[2];  // Alias is the third part
+            encryptedHex = parts[3];  // Encrypted message is the fourth part
+            console.log("Comm message details:", { 
+              targetAlias, 
+              encryptedHexLength: encryptedHex?.length,
+              monitoredConversations: Array.from(this.monitoredConversations)
+            });
           }
         }
-      }
 
-      // Emit the message event
-      console.log(`Received new message in transaction ${txId} from ${sender} to ${recipient}`);
-      this.emit("messageReceived", message);
+        // For handshake messages, we process regardless of monitored status
+        // For regular messages, we only process if the address is monitored
+        const isMonitoredAddress = (senderAddress && this.monitoredAddresses.has(senderAddress)) ||
+                                (recipientAddress && this.monitoredAddresses.has(recipientAddress));
+
+        // For comm messages, check if we're monitoring this alias
+        const isCommForUs = messageType === 'comm' && targetAlias && this.monitoredConversations.has(targetAlias);
+
+        // Try to decrypt the message
+        try {
+          // Get private key for decryption
+          const privateKeyGenerator = WalletStorage.getPrivateKeyGenerator(
+            this.unlockedWallet,
+            this.password!
+          );
+          
+          let decryptedContent = "";
+          let decryptionSuccess = false;
+
+          // Try with receive key first
+          try {
+            const privateKey = privateKeyGenerator.receiveKey(0);
+            const result = await CipherHelper.tryDecrypt(encryptedHex, privateKey.toString(), txId);
+            decryptedContent = result;
+            decryptionSuccess = true;
+            console.log(`Successfully decrypted message with receive key:`, decryptedContent);
+
+            // Check if this is a handshake message by looking at the decrypted content
+            if (decryptedContent.includes('"type":"handshake"')) {
+              messageType = 'handshake';
+              isHandshake = true;
+              // Parse the handshake content to check if it's a response
+              try {
+                const handshakeData = JSON.parse(decryptedContent);
+                if (handshakeData.isResponse) {
+                  console.log("Detected handshake response:", handshakeData);
+                  // Update monitored conversations immediately for responses
+                  await this.updateMonitoredConversations();
+                }
+              } catch (error) {
+                console.error("Error parsing handshake data:", error);
+              }
+            }
+          } catch (error) {
+            console.log(`Failed to decrypt with receive key:`, error);
+          }
+
+          // If not decrypted, try with change key
+          if (!decryptionSuccess) {
+            try {
+              const privateKey = privateKeyGenerator.changeKey(0);
+              const result = await CipherHelper.tryDecrypt(encryptedHex, privateKey.toString(), txId);
+              decryptedContent = result;
+              decryptionSuccess = true;
+              console.log(`Successfully decrypted message with change key:`, decryptedContent);
+
+              // Check if this is a handshake message by looking at the decrypted content
+              if (decryptedContent.includes('"type":"handshake"')) {
+                messageType = 'handshake';
+                isHandshake = true;
+                // Parse the handshake content to check if it's a response
+                try {
+                  const handshakeData = JSON.parse(decryptedContent);
+                  if (handshakeData.isResponse) {
+                    console.log("Detected handshake response:", handshakeData);
+                    // Update monitored conversations immediately for responses
+                    await this.updateMonitoredConversations();
+                  }
+                } catch (error) {
+                  console.error("Error parsing handshake data:", error);
+                }
+              }
+            } catch (error) {
+              console.log(`Failed to decrypt with change key:`, error);
+            }
+          }
+
+          console.log("Message analysis:", {
+            txId: tx.verboseData?.transactionId,
+            senderAddress,
+            recipientAddress,
+            isHandshake,
+            isMonitoredAddress,
+            messageType,
+            targetAlias,
+            isCommForUs,
+            decryptionSuccess,
+            decryptedContent: decryptionSuccess ? decryptedContent : null,
+            monitoredAddresses: Array.from(this.monitoredAddresses.keys()),
+            monitoredConversations: Array.from(this.monitoredConversations)
+          });
+
+          // Process the message if:
+          // 1. It's a handshake message (always process these)
+          // 2. OR it's a monitored address (for regular messages)
+          // 3. OR it's a comm message with our alias
+          if (decryptionSuccess && (isHandshake || isMonitoredAddress || isCommForUs)) {
+            // Create message object
+            const message: DecodedMessage = {
+              transactionId: tx.verboseData?.transactionId,
+              senderAddress,
+              recipientAddress,
+              content: decryptedContent,
+              timestamp: blockTime,
+              amount: tx.amount || 0,  // Use transaction amount or default to 0
+              payload: tx.payload
+            };
+
+            // Track this message
+            this.processedMessageIds.add(tx.verboseData?.transactionId);
+            
+            // Store the message
+            if (this.receiveAddress) {
+              const messagingStore = useMessagingStore.getState();
+              if (messagingStore) {
+                const myAddress = this.receiveAddress.toString();
+                messagingStore.storeMessage(message, myAddress);
+                messagingStore.loadMessages(myAddress);
+              }
+            }
+
+            // If this was a handshake message, update monitored conversations
+            if (isHandshake) {
+              await this.updateMonitoredConversations();
+            }
+
+            // Emit the message event
+            this.emit("messageReceived", message);
+          }
+        } catch (error) {
+          console.error("Error processing message payload:", error);
+        }
+      } catch (error) {
+        console.error(`Error processing message transaction ${tx.verboseData?.transactionId}:`, error);
+      }
 
     } catch (error) {
       console.error(`Error processing message transaction ${tx.verboseData?.transactionId}:`, error);
@@ -958,11 +1355,26 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
     if (!this.receiveAddress) return false;
     const ourAddress = this.receiveAddress.toString();
     
+    // Helper function to extract address from output
+    const getOutputAddress = (output: any): string | null => {
+      if (output?.scriptPublicKey?.verboseData?.scriptPublicKeyAddress) {
+        return output.scriptPublicKey.verboseData.scriptPublicKeyAddress;
+      }
+      if (output?.verboseData?.scriptPublicKeyAddress) {
+        return output.verboseData.scriptPublicKeyAddress;
+      }
+      if (output?.scriptPublicKeyAddress) {
+        return output.scriptPublicKeyAddress;
+      }
+      return null;
+    };
+    
     // Check if this is a message transaction
     const isMessageTx = this.isMessageTransaction(tx);
     if (!isMessageTx) return false;
 
     // For message transactions, check both outputs
+    const messageAmount = BigInt(20000000); // 0.2 KAS
     
     // Find message output and change output
     let messageOutput = null;
@@ -971,9 +1383,9 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
     if (tx.outputs) {
       for (const output of tx.outputs) {
         const value = typeof output.value === 'bigint' ? output.value : BigInt(output.value || 0);
-        const address = this.getOutputAddress(output);
+        const address = getOutputAddress(output);
         
-        if (value === this.MESSAGE_AMOUNT) {
+        if (value === messageAmount) {
           messageOutput = output;
         } else {
           changeOutput = output;
@@ -982,8 +1394,8 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
     }
 
     // Get addresses from outputs
-    const messageAddress = messageOutput ? this.getOutputAddress(messageOutput) : null;
-    const changeAddress = changeOutput ? this.getOutputAddress(changeOutput) : null;
+    const messageAddress = messageOutput ? getOutputAddress(messageOutput) : null;
+    const changeAddress = changeOutput ? getOutputAddress(changeOutput) : null;
 
     // We're involved if we're either the recipient (message output)
     // or the sender (change output)
@@ -1001,5 +1413,396 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
     return JSON.stringify(obj, (_, value) => 
       typeof value === 'bigint' ? value.toString() : value
     );
+  }
+
+  public async sendMessageWithContext(sendMessage: SendMessageWithContextArgs) {
+    this.ensurePasswordSet();
+    
+    // Ensure we have our receive address
+    if (!this.receiveAddress) {
+      throw new Error("Receive address not initialized");
+    }
+    
+    const minimumAmount = kaspaToSompi("0.1");
+
+    if (!minimumAmount) {
+      throw new Error("Minimum amount missing");
+    }
+
+    if (!sendMessage.toAddress) {
+      throw new Error("Destination address is required");
+    }
+
+    if (!sendMessage.message) {
+      throw new Error("Message is required");
+    }
+
+    if (!sendMessage.password) {
+      throw new Error("Password is required");
+    }
+
+    if (!sendMessage.theirAlias) {
+      throw new Error("Conversation alias is required");
+    }
+
+    // Get the conversation manager from the messaging store
+    const messagingStore = useMessagingStore.getState();
+    const conversationManager = messagingStore.conversationManager;
+    if (!conversationManager) {
+      throw new Error("Conversation manager not initialized");
+    }
+
+    // For self-messages, we still want to encrypt using the conversation partner's address
+    const conversation = conversationManager.getConversationByAlias(sendMessage.theirAlias);
+    if (!conversation) {
+      throw new Error("Could not find conversation for the given alias");
+    }
+
+    console.log("Encryption details:", {
+      conversationPartnerAddress: conversation.kaspaAddress,
+      ourAddress: this.receiveAddress?.toString(),
+      theirAlias: sendMessage.theirAlias,
+      destinationAddress: this.receiveAddress?.toString(),
+      conversation: conversation
+    });
+
+    // Use the conversation partner's address for encryption, even though we're sending to ourselves
+    const encryptedMessage = encrypt_message(conversation.kaspaAddress, sendMessage.message);
+    if (!encryptedMessage) {
+      throw new Error("Failed to encrypt message");
+    }
+
+    // Create the payload with conversation context
+    const prefix = "ciph_msg";
+    const version = "1";  // Use the current protocol version
+    const messageType = "comm";  // Use comm type for conversation messages
+    const payload = `${prefix}:${version}:${messageType}:${sendMessage.theirAlias}:${encryptedMessage.to_hex()}`;
+    
+    // Convert the payload to hex
+    const payloadHex = payload
+      .split("")
+      .map((c) => c.charCodeAt(0).toString(16).padStart(2, "0"))
+      .join("");
+
+    try {
+      // Always send to our own address for self-send messages
+      const destinationAddress = new Address(this.receiveAddress.toString());
+      
+      // Send to our own address
+      const txId = await this.createTransaction(
+        {
+          address: destinationAddress,
+          amount: minimumAmount,
+          payload: payloadHex,
+        },
+        sendMessage.password
+      );
+      
+      return txId;
+    } catch (error) {
+      console.error("Error sending message with context:", error);
+      throw error;
+    }
+  }
+
+  private async updateMonitoredConversations() {
+    try {
+      // Import the messaging store
+      const { useMessagingStore } = await import('../store/messaging.store');
+      const messagingStore = useMessagingStore.getState();
+      const conversationManager = messagingStore?.conversationManager;
+      
+      if (!conversationManager) {
+        console.log("No conversation manager available");
+        return;
+      }
+
+      // Update our monitored conversations
+      this.monitoredConversations.clear();
+      this.monitoredAddresses.clear();
+      const conversations = conversationManager.getMonitoredConversations();
+      
+      console.log("Updating monitored conversations:", conversations);
+      
+      conversations.forEach((conv: { alias: string, address: string }) => {
+          // Monitor both aliases and associate them with the partner's address
+          this.monitoredConversations.add(conv.alias);
+          this.monitoredAddresses.set(conv.address, conv.alias);
+          console.log(`Now monitoring alias: ${conv.alias} for address: ${conv.address}`);
+      });
+    } catch (error) {
+      console.error("Error updating monitored conversations:", error);
+    }
+  }
+
+  private async processBlockEvent(event: any) {
+    try {
+      console.log("Processing block event:", stringifyWithBigInt(event));
+      
+      const blockTime = Number(event?.data?.block?.header?.timestamp) || Date.now();
+      const blockHash = event?.data?.block?.header?.hash;
+      
+      // Process transactions if they exist
+      const transactions = event?.data?.block?.transactions || [];
+      
+      // Create a map of transaction IDs to their outputs for quick lookup
+      const txOutputsMap = new Map<string, any[]>();
+      transactions.forEach((tx: any) => {
+        if (tx.outputs && tx.verboseData?.transactionId) {
+          txOutputsMap.set(tx.verboseData.transactionId, tx.outputs);
+        }
+      });
+      
+      // Update monitored conversations before processing block
+      await this.updateMonitoredConversations();
+      
+      for (const tx of transactions) {
+        const txId = tx.verboseData?.transactionId;
+        if (!txId || this.processedMessageIds.has(txId)) continue;
+
+        // Check if this is a message transaction
+        if (this.isMessageTransaction(tx)) {
+          // Get sender address from transaction inputs
+          let senderAddress = null;
+          if (tx.inputs && tx.inputs.length > 0) {
+            const input = tx.inputs[0];
+            const prevTxId = input.previousOutpoint?.transactionId;
+            const prevOutputIndex = input.previousOutpoint?.index;
+            
+            if (prevTxId && typeof prevOutputIndex === 'number') {
+              try {
+                // First try to get from the previous transaction in this block
+                const prevTxOutputs = txOutputsMap.get(prevTxId);
+                if (prevTxOutputs && prevTxOutputs[prevOutputIndex]) {
+                  senderAddress = prevTxOutputs[prevOutputIndex].verboseData?.scriptPublicKeyAddress;
+                }
+                
+                // If not found in this block, try the API
+                if (!senderAddress) {
+                  const prevTx = await this._fetchTransactionDetails(prevTxId);
+                  if (prevTx?.outputs && prevTx.outputs[prevOutputIndex]) {
+                    const output = prevTx.outputs[prevOutputIndex];
+                    senderAddress = output.verboseData?.scriptPublicKeyAddress;
+                  }
+                }
+              } catch (error) {
+                console.error("Error getting sender address:", error);
+              }
+            }
+          }
+
+          // If we still don't have a sender address, use the change output address
+          if (!senderAddress && tx.outputs && tx.outputs.length > 1) {
+            // The second output is typically the change address going back to sender
+            senderAddress = tx.outputs[1].verboseData?.scriptPublicKeyAddress;
+          }
+
+          // Get the recipient address from the outputs
+          let recipientAddress = null;
+          if (tx.outputs && tx.outputs.length > 0) {
+            recipientAddress = tx.outputs[0].verboseData?.scriptPublicKeyAddress;
+          }
+
+          // Try to decode and decrypt the payload first
+          try {
+            // First verify this is a message transaction by checking the prefix
+            if (!tx.payload.startsWith(this.MESSAGE_PREFIX_HEX)) {
+              return; // Skip this transaction
+            }
+
+            // Ensure password is set before attempting decryption
+            try {
+              this.ensurePasswordSet();
+            } catch (error: unknown) {
+              const errorMessage = error instanceof Error ? error.message : "Unknown error";
+              console.log(`Cannot decrypt message ${txId} - ${errorMessage}`);
+              return;
+            }
+
+            // Extract the raw message content after the prefix
+            const messageHex = tx.payload.substring(this.MESSAGE_PREFIX_HEX.length);
+            console.log("Processing message payload:", messageHex);
+            
+            // First check if this is a handshake message by looking at the hex prefix
+            const handshakePrefix = "313a68616e647368616b653a"; // "1:handshake:" in hex
+            const commPrefix = "313a636f6d6d3a"; // "1:comm:" in hex
+            
+            let messageType = 'unknown';
+            let isHandshake = false;
+            let targetAlias = null;
+            let encryptedHex = messageHex;  // Default to full message
+            
+            // Check for handshake first - if it is, don't try to parse as string
+            if (messageHex.startsWith(handshakePrefix)) {
+              messageType = 'handshake';
+              isHandshake = true;
+              encryptedHex = messageHex;  // Keep the full message for handshake
+            } else if (messageHex.startsWith(commPrefix)) {
+              // Only try to parse as string for comm messages
+              const hexToString = (hex: string) => {
+                let str = '';
+                for (let i = 0; i < hex.length; i += 2) {
+                  str += String.fromCharCode(parseInt(hex.substr(i, 2), 16));
+                }
+                return str;
+              };
+
+              const messageStr = hexToString(messageHex);
+              console.log("Parsed message string:", messageStr);
+              const parts = messageStr.split(':');
+              console.log("Message parts:", parts);
+              
+              if (parts.length >= 4) {
+                messageType = 'comm';
+                targetAlias = parts[2];  // Alias is the third part
+                encryptedHex = parts[3];  // Encrypted message is the fourth part
+                console.log("Comm message details:", { 
+                  targetAlias, 
+                  encryptedHexLength: encryptedHex?.length,
+                  monitoredConversations: Array.from(this.monitoredConversations)
+                });
+              }
+            }
+
+            // For handshake messages, we process regardless of monitored status
+            // For regular messages, we only process if the address is monitored
+            const isMonitoredAddress = (senderAddress && this.monitoredAddresses.has(senderAddress)) ||
+                                    (recipientAddress && this.monitoredAddresses.has(recipientAddress));
+
+            // For comm messages, check if we're monitoring this alias
+            const isCommForUs = messageType === 'comm' && targetAlias && this.monitoredConversations.has(targetAlias);
+
+            // Try to decrypt the message
+            try {
+            // Get private key for decryption
+            const privateKeyGenerator = WalletStorage.getPrivateKeyGenerator(
+              this.unlockedWallet,
+              this.password!
+            );
+            
+            let decryptedContent = "";
+            let decryptionSuccess = false;
+
+            // Try with receive key first
+            try {
+              const privateKey = privateKeyGenerator.receiveKey(0);
+                const result = await CipherHelper.tryDecrypt(encryptedHex, privateKey.toString(), txId);
+              decryptedContent = result;
+              decryptionSuccess = true;
+              console.log(`Successfully decrypted message with receive key:`, decryptedContent);
+
+                // Check if this is a handshake message by looking at the decrypted content
+                if (decryptedContent.includes('"type":"handshake"')) {
+                  messageType = 'handshake';
+                  isHandshake = true;
+                  // Parse the handshake content to check if it's a response
+                  try {
+                    const handshakeData = JSON.parse(decryptedContent);
+                    if (handshakeData.isResponse) {
+                      console.log("Detected handshake response:", handshakeData);
+                      // Update monitored conversations immediately for responses
+                      await this.updateMonitoredConversations();
+                    }
+                  } catch (error) {
+                    console.error("Error parsing handshake data:", error);
+                  }
+                }
+            } catch (error) {
+              console.log(`Failed to decrypt with receive key:`, error);
+            }
+
+            // If not decrypted, try with change key
+            if (!decryptionSuccess) {
+              try {
+                const privateKey = privateKeyGenerator.changeKey(0);
+                  const result = await CipherHelper.tryDecrypt(encryptedHex, privateKey.toString(), txId);
+                decryptedContent = result;
+                decryptionSuccess = true;
+                console.log(`Successfully decrypted message with change key:`, decryptedContent);
+
+                  // Check if this is a handshake message by looking at the decrypted content
+                  if (decryptedContent.includes('"type":"handshake"')) {
+                    messageType = 'handshake';
+                    isHandshake = true;
+                    // Parse the handshake content to check if it's a response
+                    try {
+                      const handshakeData = JSON.parse(decryptedContent);
+                      if (handshakeData.isResponse) {
+                        console.log("Detected handshake response:", handshakeData);
+                        // Update monitored conversations immediately for responses
+                        await this.updateMonitoredConversations();
+                      }
+                    } catch (error) {
+                      console.error("Error parsing handshake data:", error);
+                    }
+                  }
+              } catch (error) {
+                console.log(`Failed to decrypt with change key:`, error);
+              }
+            }
+
+            console.log("Message analysis:", {
+              txId: tx.verboseData?.transactionId,
+              senderAddress,
+              recipientAddress,
+              isHandshake,
+              isMonitoredAddress,
+              messageType,
+                targetAlias,
+                isCommForUs,
+              decryptionSuccess,
+              decryptedContent: decryptionSuccess ? decryptedContent : null,
+                monitoredAddresses: Array.from(this.monitoredAddresses.keys()),
+                monitoredConversations: Array.from(this.monitoredConversations)
+            });
+
+            // Process the message if:
+            // 1. It's a handshake message (always process these)
+            // 2. OR it's a monitored address (for regular messages)
+              // 3. OR it's a comm message with our alias
+              if (decryptionSuccess && (isHandshake || isMonitoredAddress || isCommForUs)) {
+              // Create message object
+              const message: DecodedMessage = {
+                  transactionId: tx.verboseData?.transactionId,
+                senderAddress,
+                recipientAddress,
+                content: decryptedContent,
+                timestamp: blockTime,
+                  amount: tx.amount || 0,  // Use transaction amount or default to 0
+                payload: tx.payload
+              };
+
+              // Track this message
+                this.processedMessageIds.add(tx.verboseData?.transactionId);
+              
+              // Store the message
+              if (this.receiveAddress) {
+                const messagingStore = useMessagingStore.getState();
+                if (messagingStore) {
+                  const myAddress = this.receiveAddress.toString();
+                  messagingStore.storeMessage(message, myAddress);
+                  messagingStore.loadMessages(myAddress);
+                }
+              }
+
+                // If this was a handshake message, update monitored conversations
+              if (isHandshake) {
+                await this.updateMonitoredConversations();
+              }
+
+              // Emit the message event
+              this.emit("messageReceived", message);
+              }
+            } catch (error) {
+              console.error("Error processing message payload:", error);
+            }
+          } catch (error) {
+            console.error("Error processing message payload:", error);
+          }
+        }
+      }
+    } catch (error) {
+      console.error("Error processing block event:", error);
+    }
   }
 }
