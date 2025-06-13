@@ -107,8 +107,8 @@ export const MessageDisplay: FC<MessageDisplayProps> = ({
       // 2. We didn't initiate it
       // 3. It hasn't been responded to yet
       if (conversation.status === 'pending' && !conversation.initiatedByMe) {
-        console.log('Rendering handshake response for conversation:', conversation);
-        return <HandshakeResponse conversation={conversation} />;
+      console.log('Rendering handshake response for conversation:', conversation);
+      return <HandshakeResponse conversation={conversation} />;
       }
       // For other handshake messages, just show the status text
       return conversation.status === 'active' 
@@ -297,20 +297,20 @@ export const MessageDisplay: FC<MessageDisplayProps> = ({
       <div className="message-header">
         <div className="message-timestamp">
           {new Date(timestamp).toLocaleString()}
-        </div>
+      </div>
       </div>
       <div className="message-content">{renderMessageContent()}</div>
       <div className="message-footer">
-        {formatAmountAndFee()}
+          {formatAmountAndFee()}
         {transactionId && (
-          <a
-            href={getExplorerUrl(transactionId)}
-            target="_blank"
-            rel="noopener noreferrer"
+            <a 
+              href={getExplorerUrl(transactionId)}
+              target="_blank"
+              rel="noopener noreferrer"
             className="transaction-link"
-          >
+            >
             View Transaction
-          </a>
+            </a>
         )}
       </div>
     </div>

@@ -378,12 +378,12 @@ export const useWalletStore = create<WalletState>((set, get) => {
         const estimatedSize = baseTransactionSize + (message.length * bytesPerChar);
         const estimatedFee = 0.0001 + (estimatedSize * 0.00001);
         
-        return {
-          fees: estimatedFee,
-          finalAmount: 0.1,
-          transactions: 1,
-          utxos: 1
-        };
+                  return {
+            fees: estimatedFee,
+            finalAmount: 0.2,
+            transactions: 1,
+            utxos: 1
+          };
       }
     },
 

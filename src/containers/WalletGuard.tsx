@@ -264,7 +264,7 @@ export const WalletGuard = ({ onSuccess, selectedNetwork, onNetworkChange, isCon
         {error && <div className="error">{error}</div>}
         <div className="form-actions">
           <button onClick={() => onClickStep("home")}>Back</button>
-          <button onClick={onUnlockWallet}>Unlock</button>
+        <button onClick={onUnlockWallet}>Unlock</button>
         </div>
       </div>
     );

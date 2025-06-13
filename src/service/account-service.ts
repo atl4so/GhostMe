@@ -591,8 +591,8 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
         computeMass,
         storageMass,
         networkMass,
-        numInputs,
-        numOutputs,
+          numInputs,
+          numOutputs,
         numSigOps,
         payloadHex: transaction.payload?.substring(0, 50) + "...", // Log first part of payload for debugging
         // Log the full payload for debugging
@@ -620,11 +620,11 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
     utxos: number;
   }> {
     try {
-      const minimumAmount = kaspaToSompi("0.1");
+      const minimumAmount = kaspaToSompi("0.2");
 
-      if (!minimumAmount) {
-        throw new Error("Minimum amount missing");
-      }
+    if (!minimumAmount) {
+      throw new Error("Minimum amount missing");
+    }
 
       // Log original message details
       const originalMessageBytes = new TextEncoder().encode(sendMessage.message).length;
@@ -635,10 +635,10 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
       });
 
       // Encrypt the message to get actual encrypted length
-      const encryptedMessage = encrypt_message(
-        sendMessage.toAddress.toString(),
-        sendMessage.message
-      );
+    const encryptedMessage = encrypt_message(
+      sendMessage.toAddress.toString(),
+      sendMessage.message
+    );
 
       // Create the full payload with all protocol components
       const protocolPrefix = "ciph_msg:1:comm:"; // 13 bytes
@@ -664,10 +664,10 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
 
       // Create the full payload hex
       const prefix = "ciph_msg:1:comm:"
-        .split("")
-        .map((c) => c.charCodeAt(0).toString(16).padStart(2, "0"))
-        .join("");
-      
+      .split("")
+      .map((c) => c.charCodeAt(0).toString(16).padStart(2, "0"))
+      .join("");
+
       const aliasHex = alias
         .split("")
         .map((c) => c.charCodeAt(0).toString(16).padStart(2, "0"))
@@ -803,11 +803,11 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
       
       // Use a direct approach, minimizing string operations on addresses
       return this.estimateTransactionDetails({
-        address: sendMessage.toAddress,
-        amount: minimumAmount,
+      address: sendMessage.toAddress,
+      amount: minimumAmount,
         payload: payload,
         payloadSize: totalPayloadBytes
-      });
+    });
     } catch (error) {
       console.error("Error in estimateSendMessage:", error);
       throw error;
@@ -816,7 +816,7 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
 
   public async sendMessage(sendMessage: SendMessageArgs): Promise<string> {
     this.ensurePasswordSet();
-    const minimumAmount = kaspaToSompi("0.1");
+    const minimumAmount = kaspaToSompi("0.2");
 
     if (!minimumAmount) {
       throw new Error("Minimum amount missing");
@@ -843,10 +843,10 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
     let payload;
     if (isPreEncrypted) {
       // Message is already encrypted, just add the prefix
-      const prefix = "ciph_msg:"
-        .split("")
-        .map((c) => c.charCodeAt(0).toString(16).padStart(2, "0"))
-        .join("");
+    const prefix = "ciph_msg:"
+      .split("")
+      .map((c) => c.charCodeAt(0).toString(16).padStart(2, "0"))
+      .join("");
       payload = prefix + sendMessage.message;
     } else {
       // Message needs to be encrypted
@@ -866,16 +866,16 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
     }
 
     try {
-      const txId = await this.createTransaction(
-        {
-          address: destinationAddress,
-          amount: minimumAmount,
-          payload: payload,
-        },
-        sendMessage.password
-      );
+    const txId = await this.createTransaction(
+      {
+        address: destinationAddress,
+        amount: minimumAmount,
+        payload: payload,
+      },
+      sendMessage.password
+    );
     
-      return txId;
+    return txId;
     } catch (error) {
       console.error("Error sending message:", error);
       throw error;
@@ -923,7 +923,7 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
     preEncryptedHex: string, 
     password: string
   ) {
-    const minimumAmount = kaspaToSompi("0.1");
+    const minimumAmount = kaspaToSompi("0.2");
 
     if (!minimumAmount) {
       throw new Error("Minimum amount missing");
@@ -1220,22 +1220,22 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
 
         // Try to decrypt the message
         try {
-          // Get private key for decryption
-          const privateKeyGenerator = WalletStorage.getPrivateKeyGenerator(
-            this.unlockedWallet,
-            this.password!
-          );
-          
-          let decryptedContent = "";
-          let decryptionSuccess = false;
+        // Get private key for decryption
+        const privateKeyGenerator = WalletStorage.getPrivateKeyGenerator(
+          this.unlockedWallet,
+          this.password!
+        );
+        
+        let decryptedContent = "";
+        let decryptionSuccess = false;
 
-          // Try with receive key first
-          try {
-            const privateKey = privateKeyGenerator.receiveKey(0);
+        // Try with receive key first
+        try {
+          const privateKey = privateKeyGenerator.receiveKey(0);
             const result = await CipherHelper.tryDecrypt(encryptedHex, privateKey.toString(), txId);
-            decryptedContent = result;
-            decryptionSuccess = true;
-            console.log(`Successfully decrypted message with receive key:`, decryptedContent);
+          decryptedContent = result;
+          decryptionSuccess = true;
+          console.log(`Successfully decrypted message with receive key:`, decryptedContent);
 
             // Check if this is a handshake message by looking at the decrypted content
             if (decryptedContent.includes('"type":"handshake"')) {
@@ -1253,18 +1253,18 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
                 console.error("Error parsing handshake data:", error);
               }
             }
-          } catch (error) {
-            console.log(`Failed to decrypt with receive key:`, error);
-          }
+        } catch (error) {
+          console.log(`Failed to decrypt with receive key:`, error);
+        }
 
-          // If not decrypted, try with change key
-          if (!decryptionSuccess) {
-            try {
-              const privateKey = privateKeyGenerator.changeKey(0);
+        // If not decrypted, try with change key
+        if (!decryptionSuccess) {
+          try {
+            const privateKey = privateKeyGenerator.changeKey(0);
               const result = await CipherHelper.tryDecrypt(encryptedHex, privateKey.toString(), txId);
-              decryptedContent = result;
-              decryptionSuccess = true;
-              console.log(`Successfully decrypted message with change key:`, decryptedContent);
+            decryptedContent = result;
+            decryptionSuccess = true;
+            console.log(`Successfully decrypted message with change key:`, decryptedContent);
 
               // Check if this is a handshake message by looking at the decrypted content
               if (decryptedContent.includes('"type":"handshake"')) {
@@ -1282,65 +1282,65 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
                   console.error("Error parsing handshake data:", error);
                 }
               }
-            } catch (error) {
-              console.log(`Failed to decrypt with change key:`, error);
-            }
+          } catch (error) {
+            console.log(`Failed to decrypt with change key:`, error);
           }
+        }
 
-          console.log("Message analysis:", {
-            txId: tx.verboseData?.transactionId,
-            senderAddress,
-            recipientAddress,
-            isHandshake,
-            isMonitoredAddress,
-            messageType,
+        console.log("Message analysis:", {
+          txId: tx.verboseData?.transactionId,
+          senderAddress,
+          recipientAddress,
+          isHandshake,
+          isMonitoredAddress,
+          messageType,
             targetAlias,
             isCommForUs,
-            decryptionSuccess,
-            decryptedContent: decryptionSuccess ? decryptedContent : null,
+          decryptionSuccess,
+          decryptedContent: decryptionSuccess ? decryptedContent : null,
             monitoredAddresses: Array.from(this.monitoredAddresses.keys()),
             monitoredConversations: Array.from(this.monitoredConversations)
-          });
+        });
 
-          // Process the message if:
-          // 1. It's a handshake message (always process these)
-          // 2. OR it's a monitored address (for regular messages)
+        // Process the message if:
+        // 1. It's a handshake message (always process these)
+        // 2. OR it's a monitored address (for regular messages)
           // 3. OR it's a comm message with our alias
           if (decryptionSuccess && (isHandshake || isMonitoredAddress || isCommForUs)) {
-            // Create message object
-            const message: DecodedMessage = {
-              transactionId: tx.verboseData?.transactionId,
-              senderAddress,
-              recipientAddress,
-              content: decryptedContent,
-              timestamp: blockTime,
+          // Create message object
+          const message: DecodedMessage = {
+            transactionId: tx.verboseData?.transactionId,
+            senderAddress,
+            recipientAddress,
+            content: decryptedContent,
+            timestamp: blockTime,
               amount: tx.amount || 0,  // Use transaction amount or default to 0
-              payload: tx.payload
-            };
+            payload: tx.payload
+          };
 
-            // Track this message
-            this.processedMessageIds.add(tx.verboseData?.transactionId);
-            
-            // Store the message
-            if (this.receiveAddress) {
-              const messagingStore = useMessagingStore.getState();
-              if (messagingStore) {
-                const myAddress = this.receiveAddress.toString();
-                messagingStore.storeMessage(message, myAddress);
-                messagingStore.loadMessages(myAddress);
-              }
+          // Track this message
+          this.processedMessageIds.add(tx.verboseData?.transactionId);
+          
+          // Store the message
+          if (this.receiveAddress) {
+            const messagingStore = useMessagingStore.getState();
+            if (messagingStore) {
+              const myAddress = this.receiveAddress.toString();
+              messagingStore.storeMessage(message, myAddress);
+              messagingStore.loadMessages(myAddress);
             }
+          }
 
             // If this was a handshake message, update monitored conversations
-            if (isHandshake) {
-              await this.updateMonitoredConversations();
-            }
-
-            // Emit the message event
-            this.emit("messageReceived", message);
+          if (isHandshake) {
+            await this.updateMonitoredConversations();
           }
-        } catch (error) {
-          console.error("Error processing message payload:", error);
+
+          // Emit the message event
+          this.emit("messageReceived", message);
+        }
+      } catch (error) {
+        console.error("Error processing message payload:", error);
         }
       } catch (error) {
         console.error(`Error processing message transaction ${tx.verboseData?.transactionId}:`, error);
@@ -1423,7 +1423,7 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
       throw new Error("Receive address not initialized");
     }
     
-    const minimumAmount = kaspaToSompi("0.1");
+    const minimumAmount = kaspaToSompi("0.2");
 
     if (!minimumAmount) {
       throw new Error("Minimum amount missing");
