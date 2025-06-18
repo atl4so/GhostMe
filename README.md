@@ -34,7 +34,7 @@ Install NodeJs - https://nodejs.org/en/download
 
 Enter into the Kasia directory with:
 ```
-cd Kasia
+cd Kasia . .
 ```
 Then to run locally enter these two commands:
 
