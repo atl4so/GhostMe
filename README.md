@@ -2,7 +2,7 @@
 
 Make sure you have the latest version of git downloaded - https://git-scm.com/downloads
 
-Confirm your download by viewing the version number in your command line interface with:
+Verify your installation by running in your terminal:
 ```
 git version
 ```
