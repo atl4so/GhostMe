@@ -6,40 +6,42 @@ Confirm your download by viewing the version number in your command line interfa
 ```
 git version
 ```
-Clone this repo with:
+Install Rust locally and run: 
+```
+cargo install wasm-pack
+```
+
+## Clone the repository
 ```
 git clone https://github.com/K-Kluster/Kasia.git
+```
+```
+cd Kasia
 ```
 
 ## Build the cipher wasm package
 
-Install Rust locally, and install `wasm-pack` using `cargo install wasm-pack`.
-
-Follow these commands after installing wasm-pack
-
 ```
-cd Kasia
-```
-```
-cd ./cipher
+cd cipher
 ```
 ```
 wasm-pack build --target web --release -d ../cipher-wasm
 ```
-
-Install NodeJs - https://nodejs.org/en/download
-
-- Download the latest `kaspa-wasm32-sdk-v1.0.0.zip` or build yourself [WASM precompiled binaries] found here - https://github.com/kaspanet/rusty-kaspa/releases
-- Extract all the contents within this file `kaspa-wasm32-sdk\web\kaspa` into `\Kasia\wasm`
-
-Enter into the Kasia directory with:
 ```
-cd Kasia . .
+cd ..
 ```
-Then to run locally enter these two commands:
 
+## Install Node.js 
+Download Node.js: https://nodejs.org/en/download
+
+## Install Kaspa WASM Files
+
+- Download the latest `kaspa-wasm32-sdk-v1.0.0.zip` or build the [WASM precompiled binaries](https://github.com/kaspanet/rusty-kaspa/releases) yourself.
+- Extract the contents of `kaspa-wasm32-sdk/web/kaspa` into the `Kasia/wasm` directory.
+
+## Run Kasia Locally
 ```
-npm i
+npm install
 ```
 ```
 npm run dev
