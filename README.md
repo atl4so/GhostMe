@@ -37,13 +37,16 @@ If you see a version number you have installed git successfully.
       lld lldb llvm-dev llvm-runtime \
       llvm python3-clang
       ```
-  3. Install the [rust toolchain](https://rustup.rs/)
-     If you do not have a browser but only the command line interface run:
+  3. Install the [rust toolchain](https://rustup.rs/).
+
+      If you do not have a browser but only the command line interface run:
+
      ```
      curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
      ```
 
-     If you already have rust installed, update it by running:
+       If you already have rust installed, update it by running:
+    
      ```
      rustup update
      ```
