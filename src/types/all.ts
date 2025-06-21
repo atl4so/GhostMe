@@ -20,7 +20,8 @@ export type Contact = {
   address: string;
   lastMessage: Message;
   messages: Message[];
-  status?: 'active' | 'pending' | 'rejected';
+  status?: "active" | "pending" | "rejected";
+  nickname?: string;
 };
 
 export type NetworkType = "mainnet" | "testnet-10" | "testnet-11" | "devnet";
@@ -30,17 +31,17 @@ export interface BlockAddedData {
   data: Data;
 }
 
-export interface Data {
+interface Data {
   block: Block;
 }
 
-export interface Block {
+interface Block {
   header: Header;
   transactions: Transaction[];
   verboseData: VerboseData3;
 }
 
-export interface Header {
+interface Header {
   hash: string;
   version: number;
   parentsByLevel: string[][];

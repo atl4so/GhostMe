@@ -4,30 +4,38 @@
 import { FC, useCallback, useEffect, useState } from "react";
 import { KaspaClient } from "./utils/all-in-one";
 import { unknownErrorToErrorLike } from "./utils/errors";
-import { Contact, Message, NetworkType } from "./type/all";
+import { Contact, NetworkType } from "./types/all";
 import { useMessagingStore } from "./store/messaging.store";
 import { ContactCard } from "./components/ContactCard";
-import { MessageDisplay } from "./components/MessageDisplay";
 import { WalletInfo } from "./components/WalletInfo";
-import { SendMessageForm } from "./containers/SendMessageForm";
 import { ErrorCard } from "./components/ErrorCard";
 import { useWalletStore } from "./store/wallet.store";
 import { WalletGuard } from "./containers/WalletGuard";
+import { NewChatForm } from "./components/NewChatForm";
+import styles from "./OneLiner.module.css";
+import clsx from "clsx";
+import { MessageSection } from "./containers/MessagesSection";
 import { FetchApiMessages } from "./components/FetchApiMessages";
-import { NewChatForm } from './components/NewChatForm';
-import styles from './OneLiner.module.css';
 
 export const OneLiner: FC = () => {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isWalletReady, setIsWalletReady] = useState(false);
   const [isConnected, setIsConnected] = useState(false);
   const [currentClient, setCurrentClient] = useState<KaspaClient | null>(null);
-  const [connectionStatus, setConnectionStatus] = useState("Waiting for interaction");
-  const [selectedNetwork, setSelectedNetwork] = useState<NetworkType>("mainnet");
-  const [connectionAttemptInProgress, setConnectionAttemptInProgress] = useState(false);
+  const [connectionStatus, setConnectionStatus] = useState(
+    "Waiting for interaction"
+  );
+  const [selectedNetwork, setSelectedNetwork] = useState<NetworkType>(
+    import.meta.env.VITE_DEFAULT_KASPA_NETWORK ?? "mainnet"
+  );
+  const [connectionAttemptInProgress, setConnectionAttemptInProgress] =
+    useState(false);
 
   const messageStore = useMessagingStore();
   const walletStore = useWalletStore();
+  const unlockedWalletName = useWalletStore(
+    (state) => state.unlockedWallet?.name
+  );
 
   const connectToNetwork = useCallback(
     async (networkId: NetworkType) => {
@@ -50,14 +58,16 @@ export const OneLiner: FC = () => {
           setCurrentClient(null);
         }
 
-        console.log(`Attempting to connect to ${networkId} (type: ${typeof networkId})`);
+        console.log(
+          `Attempting to connect to ${networkId} (type: ${typeof networkId})`
+        );
         const client = new KaspaClient(networkId);
 
         // Try to connect
         console.log("Calling connect() on KaspaClient...");
         await client.connect();
         console.log("Connect() call completed");
-        
+
         if (client.connected) {
           console.log(`Successfully connected to ${networkId}`);
           setCurrentClient(client);
@@ -107,35 +117,49 @@ export const OneLiner: FC = () => {
         if (!isEffectActive) return;
 
         // Check if we need to reconnect
-        const needsReconnect = !currentClient?.connected || 
-                             currentClient?.networkId !== selectedNetwork;
+        const needsReconnect =
+          !currentClient?.connected ||
+          currentClient?.networkId !== selectedNetwork;
 
         if (needsReconnect) {
           if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
-            setConnectionStatus("Failed to establish stable connection after multiple attempts");
+            setConnectionStatus(
+              "Failed to establish stable connection after multiple attempts"
+            );
             setIsConnected(false);
             setCurrentClient(null);
             return;
           }
 
           reconnectAttempts++;
-          console.log(`Connection attempt ${reconnectAttempts} of ${MAX_RECONNECT_ATTEMPTS} for ${selectedNetwork}`);
-          
+          console.log(
+            `Connection attempt ${reconnectAttempts} of ${MAX_RECONNECT_ATTEMPTS} for ${selectedNetwork}`
+          );
+
           // Add delay between reconnection attempts
           if (reconnectAttempts > 1) {
-            await new Promise(resolve => setTimeout(resolve, RECONNECT_DELAY));
+            await new Promise((resolve) =>
+              setTimeout(resolve, RECONNECT_DELAY)
+            );
           }
 
           // Disconnect existing client if network changed
-          if (currentClient?.connected && currentClient.networkId !== selectedNetwork) {
-            console.log(`Disconnecting from ${currentClient.networkId} to connect to ${selectedNetwork}`);
+          if (
+            currentClient?.connected &&
+            currentClient.networkId !== selectedNetwork
+          ) {
+            console.log(
+              `Disconnecting from ${currentClient.networkId} to connect to ${selectedNetwork}`
+            );
             await currentClient.disconnect();
             setCurrentClient(null);
           }
 
           await connectToNetwork(selectedNetwork);
         } else {
-          console.log(`Already connected to ${selectedNetwork}, no reconnection needed`);
+          console.log(
+            `Already connected to ${selectedNetwork}, no reconnection needed`
+          );
           // Ensure connection state is synced with current client
           setIsConnected(true);
           setConnectionStatus(`Connected to ${selectedNetwork}`);
@@ -143,7 +167,11 @@ export const OneLiner: FC = () => {
       } catch (error) {
         console.error("Network connection error:", error);
         if (isEffectActive) {
-          setConnectionStatus(`Connection error: ${error instanceof Error ? error.message : 'Unknown error'}`);
+          setConnectionStatus(
+            `Connection error: ${
+              error instanceof Error ? error.message : "Unknown error"
+            }`
+          );
           setIsConnected(false);
           setCurrentClient(null);
         }
@@ -155,7 +183,24 @@ export const OneLiner: FC = () => {
     return () => {
       isEffectActive = false;
     };
-  }, [selectedNetwork, connectToNetwork, currentClient, connectionAttemptInProgress]);
+  }, [
+    selectedNetwork,
+    connectToNetwork,
+    currentClient,
+    connectionAttemptInProgress,
+  ]);
+
+  // Auto-clear connection-related errors when connection succeeds
+  useEffect(() => {
+    if (isConnected && connectionStatus.includes("Connected")) {
+      // Clear any connection-related error messages
+      if (errorMessage?.includes("WebSocket") || 
+          errorMessage?.includes("RPC") || 
+          errorMessage?.includes("Failed to start messaging")) {
+        setErrorMessage(null);
+      }
+    }
+  }, [isConnected, connectionStatus, errorMessage]);
 
   const onWalletUnlocked = useCallback(() => {
     setIsWalletReady(true);
@@ -168,82 +213,27 @@ export const OneLiner: FC = () => {
         return;
       }
 
-    messageStore.setIsCreatingNewChat(true);
+      messageStore.setIsCreatingNewChat(true);
 
       // The UI should now show a form to enter recipient address
       // When address is entered, it will call initiateHandshake
     } catch (error) {
       console.error("Failed to start new chat:", error);
-      setErrorMessage(`Failed to start new chat: ${unknownErrorToErrorLike(error)}`);
+      setErrorMessage(
+        `Failed to start new chat: ${unknownErrorToErrorLike(error)}`
+      );
     }
   }, [walletStore.unlockedWallet, messageStore]);
 
-  const onClearHistory = useCallback(() => {
-    if (!walletStore.address) {
-      return;
-    }
-
-    if (confirm("Are you sure you want to clear all message history? This cannot be undone.")) {
-      messageStore.flushCache(walletStore.address.toString());
-    }
-  }, [walletStore.address, messageStore]);
-
-  const onExportMessages = useCallback(async () => {
-    if (!walletStore.unlockedWallet?.password) {
-      alert("Please unlock your wallet first");
-      return;
-    }
-
-    try {
-      const blob = await messageStore.exportMessages(
-        walletStore.unlockedWallet,
-        walletStore.unlockedWallet.password
-      );
-      
-      // Create download link
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `kaspa-messages-backup-${new Date().toISOString().split('T')[0]}.json`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-    } catch (error) {
-      console.error("Error exporting messages:", error);
-      alert("Failed to export messages");
-    }
-  }, [messageStore, walletStore.unlockedWallet]);
-
-  const onImportMessages = useCallback(async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
-    
-    if (!walletStore.unlockedWallet?.password) {
-      alert("Please unlock your wallet first");
-      return;
-    }
-
-    try {
-      await messageStore.importMessages(
-        file, 
-        walletStore.unlockedWallet,
-        walletStore.unlockedWallet.password
-      );
-      alert("Messages imported successfully!");
-    } catch (error: unknown) {
-      console.error("Error importing messages:", error);
-      alert(error instanceof Error ? error.message : "Failed to import messages");
-    }
-    
-    // Clear the input
-    event.target.value = '';
-  }, [messageStore, walletStore.unlockedWallet]);
-
   const onStartMessagingProcessClicked = useCallback(async () => {
     try {
+      // Clear any previous error messages
+      setErrorMessage(null);
+      
       if (!currentClient || !currentClient.connected) {
-        setErrorMessage("Please choose a network and connect to the Kaspa Network first");
+        setErrorMessage(
+          "Please choose a network and connect to the Kaspa Network first"
+        );
         return;
       }
 
@@ -261,10 +251,30 @@ export const OneLiner: FC = () => {
       // Load existing messages
       messageStore.loadMessages(receiveAddressStr);
       messageStore.setIsLoaded(true);
-
+      
+      // Check if we should trigger API message fetching for imported wallets
+      const shouldFetchApi = localStorage.getItem('kasia_fetch_api_on_start');
+      if (shouldFetchApi === 'true') {
+        console.log('Triggering API message fetch for imported wallet...');
+        // Set a flag to trigger API fetching after a short delay
+        setTimeout(() => {
+          const event = new CustomEvent('kasia-trigger-api-fetch', {
+            detail: { address: receiveAddressStr }
+          });
+          window.dispatchEvent(event);
+        }, 1000);
+        
+        // Clear the flag after use
+        localStorage.removeItem('kasia_fetch_api_on_start');
+      }
+      
+      // Clear error message on success
+      setErrorMessage(null);
     } catch (error) {
       console.error("Failed to start messaging process:", error);
-      setErrorMessage(`Failed to start messaging: ${unknownErrorToErrorLike(error)}`);
+      setErrorMessage(
+        `Failed to start messaging: ${unknownErrorToErrorLike(error)}`
+      );
     }
   }, [currentClient, walletStore, messageStore]);
 
@@ -281,27 +291,6 @@ export const OneLiner: FC = () => {
     [messageStore, walletStore.address]
   );
 
-  // Add function to handle handshake initiation
-  const initiateHandshakeWithRecipient = useCallback(async (recipientAddress: string) => {
-    try {
-      if (!walletStore.unlockedWallet?.password) {
-        throw new Error("Wallet must be unlocked");
-      }
-
-      // Initiate handshake and get payload
-      const { payload, conversation } = await messageStore.initiateHandshake(recipientAddress);
-
-      // Create and send transaction with handshake payload
-      // You'll need to implement the actual transaction sending here
-      // This might involve using your existing transaction creation methods
-
-      messageStore.setIsCreatingNewChat(false);
-    } catch (error) {
-      console.error("Failed to initiate handshake:", error);
-      setErrorMessage(`Failed to initiate handshake: ${unknownErrorToErrorLike(error)}`);
-    }
-  }, [walletStore.unlockedWallet, messageStore]);
-
   return (
     <div className="container">
       <div className="header-container">
@@ -314,32 +303,50 @@ export const OneLiner: FC = () => {
           <WalletInfo
             state={walletStore.address ? "connected" : "detected"}
             address={walletStore.address?.toString()}
-            balance={walletStore.balance}
             isWalletReady={isWalletReady}
           />
         </div>
       </div>
 
-      <div className="wallet-controls">
-        <div className="wallet-controls-left">
+      <div className="px-8 py-4 bg-[var(--primary-bg)]">
+        <div className="flex items-center gap-4">
           {isWalletReady ? (
-            <>
-              <button onClick={onStartMessagingProcessClicked} id="connectButton">
-                Start Wallet Service
-              </button>
-              <button onClick={() => {
-                walletStore.lock();
-                setIsWalletReady(false);
-                messageStore.setIsLoaded(false);
-                messageStore.setOpenedRecipient(null);
-                messageStore.setIsCreatingNewChat(false);
-              }} className="close-wallet-button">
-                Close Wallet
-              </button>
-            </>
+            <div className="flex flex-col sm:flex-row justify-between items-start gap-4 w-full">
+              <div className="flex flex-col items-start text-xs gap-1 whitespace-nowrap">
+                <div>
+                  <strong>Network:</strong> {walletStore.selectedNetwork}
+                </div>
+                <div>
+                  <strong>Wallet Name:</strong> {unlockedWalletName}
+                </div>
+              </div>
+              <div className="flex items-center gap-2 text-sm">
+                <button
+                  className={clsx(
+                    "bg-[var(--accent-blue)] hover:bg-[var(--accent-blue)]/90 text-white text-sm font-bold py-2 px-4 rounded cursor-pointer",
+                    { "opacity-50 cursor-not-allowed": messageStore.isLoaded }
+                  )}
+                  onClick={onStartMessagingProcessClicked}
+                >
+                  Start Wallet Service
+                </button>
+                <button
+                  onClick={() => {
+                    walletStore.lock();
+                    setIsWalletReady(false);
+                    messageStore.setIsLoaded(false);
+                    messageStore.setOpenedRecipient(null);
+                    messageStore.setIsCreatingNewChat(false);
+                  }}
+                  className="bg-[var(--accent-blue)] hover:bg-[var(--accent-blue)]/90 text-white text-sm font-bold py-2 px-4 rounded cursor-pointer"
+                >
+                  Close Wallet
+                </button>
+              </div>
+            </div>
           ) : (
-            <WalletGuard 
-              onSuccess={onWalletUnlocked} 
+            <WalletGuard
+              onSuccess={onWalletUnlocked}
               selectedNetwork={selectedNetwork}
               onNetworkChange={setSelectedNetwork}
               isConnected={isConnected}
@@ -362,86 +369,42 @@ export const OneLiner: FC = () => {
             </div>
             <div className="contacts-list">
               {messageStore.contacts
-                ?.filter(c => c?.address && c.address !== walletStore.address?.toString())
+                ?.filter(
+                  (c) =>
+                    c?.address && c.address !== walletStore.address?.toString()
+                )
                 .map((c) => (
                   <ContactCard
                     isSelected={c.address === messageStore.openedRecipient}
-                    key={`${c.address}-${c.status || 'unknown'}`}
+                    key={`${c.address}-${c.status || "unknown"}`}
                     contact={c}
                     onClick={onContactClicked}
                   />
                 ))}
             </div>
           </div>
-          <div className="messages-section">
-            <div className="messages-header">
-              <h3>Messages</h3>
-              <div className="header-actions">
-                {walletStore.address && <FetchApiMessages address={walletStore.address.toString()} />}
-                <button
-                  onClick={onExportMessages}
-                  className="backup-button"
-                  title="Export message backup"
-                >
-                  Export Backup
-                </button>
-                <label className="import-button" title="Import message backup">
-                  Import Backup
-                  <input
-                    type="file"
-                    accept=".json"
-                    style={{ display: 'none' }}
-                    onChange={onImportMessages}
-                  />
-                </label>
-                <button
-                  onClick={onClearHistory}
-                  id="clearHistoryButton"
-                  className="clear-history-button"
-                >
-                  Clear History
-                </button>
-              </div>
+          <MessageSection />
+          {/* Add invisible FetchApiMessages component to listen for localStorage trigger events */}
+          {walletStore.address && (
+            <div style={{ display: 'none' }}>
+              <FetchApiMessages address={walletStore.address.toString()} />
             </div>
-            <div 
-              className="messages-list" 
-              ref={(el) => {
-                // Auto-scroll to bottom when new messages arrive
-                if (el) {
-                  el.scrollTop = el.scrollHeight;
-                }
-              }}
-            >
-              {messageStore.isCreatingNewChat ? (
-                <div className="no-messages">
-                  Enter a recipient address to start a new conversation.
-                </div>
-              ) : messageStore.messagesOnOpenedRecipient.length ? (
-                messageStore.messagesOnOpenedRecipient.map((msg) => (
-                  <MessageDisplay
-                    isOutgoing={msg.senderAddress === walletStore.address?.toString()}
-                    key={msg.transactionId}
-                    message={msg}
-                  />
-                ))
-              ) : (
-                <div className="no-messages">
-                  No messages in this conversation.
-                </div>
-              )}
-            </div>
-            <SendMessageForm />
-          </div>
+          )}
         </div>
       ) : null}
       <div id="transactions">
-        <ErrorCard error={errorMessage} />
+        <ErrorCard 
+          error={errorMessage} 
+          onDismiss={() => setErrorMessage(null)} 
+        />
       </div>
 
       {/* Add NewChatForm when isCreatingNewChat is true */}
       {messageStore.isCreatingNewChat && (
-        <div className={styles['modal-overlay']}>
-          <NewChatForm onClose={() => messageStore.setIsCreatingNewChat(false)} />
+        <div className={styles["modal-overlay"]}>
+          <NewChatForm
+            onClose={() => messageStore.setIsCreatingNewChat(false)}
+          />
         </div>
       )}
     </div>

@@ -6,27 +6,22 @@ import {
   PendingTransaction,
   UtxoContext,
   UtxoProcessor,
-  UtxoProcessorEvent,
-  UtxoProcessorEventMap,
-  IBalanceEvent,
-  IPendingEvent,
-  IMaturityEvent,
-  Balance,
   UtxoEntry,
   IUtxosChanged,
-  IBlockAdded,
   ITransaction,
-  NetworkType,
-  Transaction,
-  calculateTransactionMass,
+  sompiToKaspaString,
+  FeeSource,
+  GeneratorSummary,
 } from "kaspa-wasm";
-import { KaspaClient, decodePayload } from "../utils/all-in-one";
-import { UnlockedWallet, WalletStorage } from "../utils/wallet-storage";
+import { KaspaClient } from "../utils/all-in-one";
+import { WalletStorage } from "../utils/wallet-storage";
 import EventEmitter from "eventemitter3";
 import { encrypt_message } from "cipher";
 import { CipherHelper } from "../utils/cipher-helper";
-import { create } from "zustand";
 import { useMessagingStore } from "../store/messaging.store";
+import { useWalletStore } from "../store/wallet.store";
+import { UnlockedWallet } from "src/types/wallet.type";
+import { TransactionId } from "src/types/transactions";
 
 // Message related types
 type DecodedMessage = {
@@ -49,15 +44,37 @@ type DecodedMessage = {
 // strictly typed events
 type AccountServiceEvents = {
   balance: (balance: {
-    mature: number;
-    pending: number;
-    outgoing: number;
+    mature: bigint;
+    pending: bigint;
+    outgoing: bigint;
+    matureDisplay: string;
+    pendingDisplay: string;
+    outgoingDisplay: string;
     matureUtxoCount: number;
     pendingUtxoCount: number;
   }) => void;
   utxosChanged: (utxos: UtxoEntry[]) => void;
   transactionReceived: (transaction: any) => void;
   messageReceived: (message: DecodedMessage) => void;
+};
+
+type SendMessageArgs = {
+  toAddress: Address;
+  message: string;
+  password: string;
+  amount?: bigint; // Optional custom amount, defaults to 0.2 KAS
+};
+
+type EstimateSendMessageFeesArgs = {
+  toAddress: Address;
+  message: string;
+};
+
+type SendMessageWithContextArgs = {
+  toAddress: Address;
+  message: string;
+  password: string;
+  theirAlias: string;
 };
 
 type CreateTransactionArgs = {
@@ -68,17 +85,9 @@ type CreateTransactionArgs = {
   messageLength?: number;
 };
 
-type SendMessageArgs = {
-  toAddress: Address;
-  message: string;
-  password: string;
-};
-
-type SendMessageWithContextArgs = {
-  toAddress: Address;
-  message: string;
-  password: string;
-  theirAlias: string;
+type CreateWithdrawTransactionArgs = {
+  address: Address;
+  amount: bigint;
 };
 
 // Add this helper function at the top level
@@ -160,8 +169,8 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
     }
   }
 
-  private async _emitBalanceUpdate() {
-    const balance = await this.context.balance;
+  private _emitBalanceUpdate() {
+    const balance = this.context.balance;
     if (!balance) return;
 
     // Get UTXOs for counting
@@ -171,26 +180,21 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
     );
     const pendingUtxos = this.context.getPending();
 
-    // Convert balance values from sompi to KAS
-    const matureKAS = Number(balance.mature) / 100000000;
-    const pendingKAS = Number(balance.pending) / 100000000;
-    const outgoingKAS = Number(balance.outgoing) / 100000000;
-
-    console.log("Balance update (in KAS):", {
-      mature: matureKAS,
-      pending: pendingKAS,
-      outgoing: outgoingKAS,
+    console.log("Balance update:", {
       matureUtxoCount: matureUtxos.length,
       pendingUtxoCount: pendingUtxos.length,
-      rawMature: balance.mature.toString(),
-      rawPending: balance.pending.toString(),
-      rawOutgoing: balance.outgoing.toString(),
+      mature: balance.mature.toString(),
+      pending: balance.pending.toString(),
+      outgoing: balance.outgoing.toString(),
     });
 
     this.emit("balance", {
-      mature: matureKAS,
-      pending: pendingKAS,
-      outgoing: outgoingKAS,
+      mature: balance.mature,
+      pending: balance.pending,
+      outgoing: balance.outgoing,
+      matureDisplay: sompiToKaspaString(balance.mature),
+      pendingDisplay: sompiToKaspaString(balance.pending),
+      outgoingDisplay: sompiToKaspaString(balance.outgoing),
       matureUtxoCount: matureUtxos.length,
       pendingUtxoCount: pendingUtxos.length,
     });
@@ -280,6 +284,9 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
 
       console.log(`Found ${transactions.length} historical transactions`);
 
+      // Update monitored conversations BEFORE processing messages
+      await this.updateMonitoredConversations();
+
       // Process each transaction
       for (const tx of transactions) {
         const txId = tx.transactionId;
@@ -295,43 +302,6 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
     } catch (error) {
       console.error("Error fetching historical messages:", error);
     }
-  }
-
-  private async _onUtxoChanged(notification: IUtxosChanged) {
-    console.log("Processing UTXO change:", notification);
-
-    // Get all mature UTXOs for the UTXO update event
-    const utxos = this.context.getMatureRange(0, this.context.matureLength);
-
-    // Log UTXO details for debugging
-    console.log(
-      "Current UTXOs:",
-      utxos.map((utxo) => ({
-        transactionId: utxo.outpoint.transactionId,
-        amount: Number(utxo.entry.amount) / 100000000,
-        amountSompi: utxo.entry.amount.toString(),
-        scriptPublicKey: utxo.entry.scriptPublicKey.toString(),
-        isMature: true, // Since we got it from getMatureRange
-      }))
-    );
-
-    // Emit the balance update
-    this._emitBalanceUpdate();
-
-    // Calculate total amount in sompi first, then convert to KAS
-    const totalSompi = utxos.reduce(
-      (sum, utxo) => sum + utxo.entry.amount,
-      BigInt(0)
-    );
-    const totalKAS = Number(totalSompi) / 100000000;
-
-    // Emit UTXO update
-    console.log("UTXOs updated:", {
-      count: utxos.length,
-      matureLength: this.context.matureLength,
-      totalAmount: totalKAS,
-    });
-    this.emit("utxosChanged", utxos);
   }
 
   async start() {
@@ -361,42 +331,11 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
       // Set up balance change listener
       this.processor.addEventListener("balance", async () => {
         console.log("Balance event received");
-        await this._emitBalanceUpdate();
-      });
-
-      // Set up maturity change listener
-      this.processor.addEventListener("maturity", async () => {
-        console.log("Maturity event received");
-        await this._emitBalanceUpdate();
-      });
-
-      // Set up pending change listener
-      this.processor.addEventListener("pending", async () => {
-        console.log("Pending event received");
-        await this._emitBalanceUpdate();
+        this._emitBalanceUpdate();
       });
 
       // Only track primary address
       const addressesToTrack = [this.receiveAddress!];
-      const addressStrings = addressesToTrack.map((addr) => addr.toString());
-
-      // First, get initial UTXOs from RPC
-      console.log("Fetching initial UTXOs...");
-      const utxoResponse = await this.rpcClient.rpc?.getUtxosByAddresses(
-        addressStrings
-      );
-
-      if (
-        utxoResponse &&
-        utxoResponse.entries &&
-        utxoResponse.entries.length > 0
-      ) {
-        console.log(
-          `Found ${utxoResponse.entries.length} initial UTXOs from RPC`
-        );
-      } else {
-        console.log("No initial UTXOs found from RPC");
-      }
 
       // Now track addresses in UTXO processor
       console.log("Starting address tracking for primary address...");
@@ -413,7 +352,7 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
       await this.fetchHistoricalMessages();
 
       // Get initial state one more time to ensure we're up to date
-      await this._emitBalanceUpdate();
+      this._emitBalanceUpdate();
 
       this.isStarted = true;
     } catch (error) {
@@ -442,7 +381,7 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
   public async createTransaction(
     transaction: CreateTransactionArgs,
     password: string
-  ): Promise<string> {
+  ): Promise<TransactionId> {
     if (!this.isStarted || !this.rpcClient.rpc) {
       throw new Error("Account service is not started");
     }
@@ -457,10 +396,6 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
 
     if (!transaction.amount) {
       throw new Error("Transaction amount is required");
-    }
-
-    if (!transaction.payload) {
-      throw new Error("Transaction payload is required");
     }
 
     console.log("=== CREATING TRANSACTION ===");
@@ -489,9 +424,6 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
     if (!privateKeyGenerator) {
       throw new Error("Failed to generate private key");
     }
-
-    // Ensure the destination address has the proper prefix
-    const destinationAddress = this.ensureAddressPrefix(transaction.address);
 
     if (!this.context) {
       throw new Error("UTXO context not initialized");
@@ -539,6 +471,115 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
       // Submit the transaction
       console.log("Submitting transaction to network...");
       const txId: string = await pendingTransaction.submit(this.rpcClient.rpc);
+      console.log(`Transaction submitted with ID: ${txId}`);
+      console.log("========================");
+
+      return txId;
+    } catch (error) {
+      console.error("Error creating transaction:", error);
+      throw error;
+    }
+  }
+
+  public async createWithdrawTransaction(
+    withdrawTransaction: CreateWithdrawTransactionArgs,
+    password: string
+  ) {
+    if (!this.isStarted || !this.rpcClient.rpc) {
+      throw new Error("Account service is not started");
+    }
+
+    if (!this.receiveAddress) {
+      throw new Error("Receive address not initialized");
+    }
+
+    if (!withdrawTransaction.address) {
+      throw new Error("Transaction address is required");
+    }
+
+    if (!withdrawTransaction.amount) {
+      throw new Error("Transaction amount is required");
+    }
+
+    console.log("=== CREATING WITHDRAW TRANSACTION ===");
+    const primaryAddress = this.receiveAddress;
+    console.log(
+      "Creating withdraw transaction from primary address:",
+      primaryAddress.toString()
+    );
+    console.log(
+      "Change will go back to primary address:",
+      primaryAddress.toString()
+    );
+    console.log(`Destination: ${withdrawTransaction.address.toString()}`);
+    console.log(
+      `Amount: ${Number(withdrawTransaction.amount) / 100000000} KAS (${
+        withdrawTransaction.amount
+      } sompi)`
+    );
+    const privateKeyGenerator = WalletStorage.getPrivateKeyGenerator(
+      this.unlockedWallet,
+      password
+    );
+
+    if (!privateKeyGenerator) {
+      throw new Error("Failed to generate private key");
+    }
+
+    if (!this.context) {
+      throw new Error("UTXO context not initialized");
+    }
+
+    try {
+      // Use our optimized generator creation method
+      const generator =
+        this._getGeneratorForWithdrawTransaction(withdrawTransaction);
+
+      console.log("Generating transaction...");
+      const pendingTransaction: PendingTransaction | null =
+        await generator.next();
+
+      if (!pendingTransaction) {
+        throw new Error("Failed to generate transaction");
+      }
+
+      if ((await generator.next()) !== null) {
+        throw new Error("Unexpected multiple transaction generation");
+      }
+
+      // Log the addresses that need signing
+      const addressesToSign = pendingTransaction.addresses();
+      console.log(
+        `Transaction requires signing ${addressesToSign.length} addresses:`
+      );
+      addressesToSign.forEach((addr, i) => {
+        console.log(`  Address ${i + 1}: ${addr.toString()}`);
+      });
+
+      // Always use receive key for all addresses since we only use primary address
+      const privateKeys = pendingTransaction.addresses().map(() => {
+        console.log("Using primary address key for signing");
+        const key = privateKeyGenerator.receiveKey(0);
+        if (!key) {
+          throw new Error("Failed to generate private key for signing");
+        }
+        return key;
+      });
+
+      // Sign the transaction
+      console.log("Signing transaction...");
+      pendingTransaction.sign(privateKeys);
+
+      // Submit the transaction
+      console.log("Submitting transaction to network...");
+
+      const txId: string = await pendingTransaction.submit(this.rpcClient.rpc);
+
+      // reset the context to workaround "withdraw all" use-case where change address isn't the user
+      // @IMPROVEMENT: this could be only executed when "withdraw all", currently done even if it's partial
+      await this.context.clear();
+      await this.context.trackAddresses([this.receiveAddress!]);
+
       console.log(`Transaction submitted with ID: ${txId}`);
       console.log("========================");
 
@@ -597,309 +638,16 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
     }
   }
 
-  public async estimateTransactionDetails(
-    transaction: CreateTransactionArgs
-  ): Promise<{
-    fees: number;
-    finalAmount: number;
-    transactions: number;
-    utxos: number;
-  }> {
-    try {
-      const summary = await this.estimateTransaction(transaction);
-      if (!summary) {
-        throw new Error("Failed to get transaction summary");
-      }
-
-      // Base transaction components
-      const baseTransactionMass = 200; // Base transaction overhead
-      const inputMass = 165; // Per input mass (including signature)
-      const outputMass = 35; // Per output mass
-      const sigOpMass = 1000; // Mass per signature operation
-
-      const numInputs = summary.utxos || 1;
-      const numOutputs = 1; // Always 1 output since all messages are self-messages
-      const numSigOps = numInputs; // One signature operation per input
-
-      // Use provided payload size or calculate from hex
-      const payloadSize =
-        transaction.payloadSize ||
-        (() => {
-          const payloadHex = transaction.payload || "";
-          return Math.ceil(payloadHex.length / 2); // Convert hex to bytes
-        })();
-
-      // Calculate compute mass
-      const computeMass = Math.floor(
-        // Ensure integer mass
-        baseTransactionMass +
-          inputMass * numInputs +
-          outputMass * numOutputs +
-          sigOpMass * numSigOps +
-          payloadSize
-      );
-
-      // Calculate storage mass based on KIP-0009
-      // For our messaging transactions, we're always within the safe limits:
-      // - We use 1-2 outputs max
-      // - Our amounts are above 0.02 KAS
-      // So storage mass won't be the limiting factor
-      const storageMass = computeMass;
-
-      // Network mass is the max of compute and storage mass
-      const networkMass = Math.floor(Math.max(computeMass, storageMass)); // Ensure integer mass
-
-      // Final fee is 1 sompi per gram of mass
-      const fees = networkMass;
-
-      console.log("Transaction mass calculation:", {
-        baseTransactionMass,
-        inputMassTotal: inputMass * numInputs,
-        outputMassTotal: outputMass * numOutputs,
-        sigOpMassTotal: sigOpMass * numSigOps,
-        payloadSize,
-        computeMass,
-        storageMass,
-        networkMass,
-        numInputs,
-        numOutputs,
-        numSigOps,
-        payloadHex: transaction.payload?.substring(0, 50) + "...", // Log first part of payload for debugging
-        // Log the full payload for debugging
-        fullPayload: transaction.payload,
-      });
-
-      const result = {
-        fees: fees / 100000000, // Convert to KAS
-        finalAmount: Number(summary.finalAmount) / 100000000,
-        transactions: summary.transactions,
-        utxos: summary.utxos,
-      };
-
-      return result;
-    } catch (error) {
-      console.error("Error in estimateTransactionDetails:", error);
-      throw error;
-    }
-  }
-
-  public async estimateSendMessage(sendMessage: SendMessageArgs): Promise<{
-    fees: number;
-    finalAmount: number;
-    transactions: number;
-    utxos: number;
-  }> {
-    try {
-      const minimumAmount = kaspaToSompi("0.2");
-
-      if (!minimumAmount) {
-        throw new Error("Minimum amount missing");
-      }
-
-      // Log original message details
-      const originalMessageBytes = new TextEncoder().encode(
-        sendMessage.message
-      ).length;
-      console.log("Original message details:", {
-        message: sendMessage.message,
-        length: sendMessage.message.length,
-        bytes: originalMessageBytes,
-      });
-
-      // Encrypt the message to get actual encrypted length
-      const encryptedMessage = encrypt_message(
-        sendMessage.toAddress.toString(),
-        sendMessage.message
-      );
-
-      // Create the full payload with all protocol components
-      const protocolPrefix = "ciph_msg:1:comm:"; // 13 bytes
-      const alias = "f74137627867"; // Fixed 13 bytes
-      const separator = ":"; // 1 byte
-      const encryptedHex = encryptedMessage.to_hex();
-
-      // Calculate actual byte sizes (not hex lengths)
-      const protocolPrefixBytes = 13; // Fixed size from actual transaction
-      const aliasBytes = 13; // Fixed size from actual transaction
-      const separatorBytes = 1; // Fixed size from actual transaction
-
-      // Calculate encryption overhead dynamically
-      // Base overhead: 360 bytes (from previous transaction)
-      // Additional overhead: ~2 bytes per message byte (from comparing transactions)
-      // Fixed overhead: 12 bytes (from comparing actual transactions)
-      const baseEncryptionOverhead = 360;
-      const perByteOverhead = 2;
-      const fixedOverhead = 12;
-      const encryptedBytes =
-        baseEncryptionOverhead +
-        originalMessageBytes * perByteOverhead -
-        fixedOverhead;
-
-      const totalPayloadBytes =
-        protocolPrefixBytes + aliasBytes + separatorBytes + encryptedBytes;
-
-      // Create the full payload hex
-      const prefix = "ciph_msg:1:comm:"
-        .split("")
-        .map((c) => c.charCodeAt(0).toString(16).padStart(2, "0"))
-        .join("");
-
-      const aliasHex = alias
-        .split("")
-        .map((c) => c.charCodeAt(0).toString(16).padStart(2, "0"))
-        .join("");
-
-      const separatorHex = ":"
-        .split("")
-        .map((c) => c.charCodeAt(0).toString(16).padStart(2, "0"))
-        .join("");
-
-      const payload = prefix + aliasHex + separatorHex + encryptedHex;
-
-      // Calculate the actual mass
-      const baseTransactionMass = 200; // Base transaction overhead
-      const inputMass = 165; // Per input mass (including signature)
-      const outputMass = 35; // Per output mass
-      const sigOpMass = 1000; // Mass per signature operation
-
-      const numInputs = 1;
-      const numOutputs = 1;
-      const numSigOps = 1;
-
-      // Calculate compute mass using actual byte sizes
-      const computeMass = Math.floor(
-        // Ensure integer mass
-        baseTransactionMass +
-          inputMass * numInputs +
-          outputMass * numOutputs +
-          sigOpMass * numSigOps +
-          totalPayloadBytes
-      );
-
-      // Calculate storage mass based on KIP-0009
-      const storageMass = computeMass;
-
-      // Network mass is the max of compute and storage mass
-      const networkMass = Math.floor(Math.max(computeMass, storageMass)); // Ensure integer mass
-
-      // Final fee is 1 sompi per gram of mass
-      const fees = networkMass;
-
-      // Log detailed encryption overhead
-      console.log("Encryption overhead breakdown:", {
-        originalMessage: {
-          text: sendMessage.message,
-          length: sendMessage.message.length,
-          bytes: originalMessageBytes,
-        },
-        encryptedMessage: {
-          hex: encryptedHex,
-          hexLength: encryptedHex.length,
-          bytes: encryptedBytes,
-          overhead: encryptedBytes - originalMessageBytes,
-          breakdown: {
-            baseOverhead: baseEncryptionOverhead,
-            perByteOverhead: perByteOverhead,
-            messageOverhead: originalMessageBytes * perByteOverhead,
-            fixedOverhead: fixedOverhead,
-            totalOverhead:
-              baseEncryptionOverhead +
-              originalMessageBytes * perByteOverhead -
-              fixedOverhead,
-          },
-        },
-        protocolComponents: {
-          prefix: {
-            text: "ciph_msg:1:comm:",
-            bytes: protocolPrefixBytes,
-            hex: prefix,
-            hexLength: prefix.length,
-          },
-          alias: {
-            text: alias,
-            bytes: aliasBytes,
-            hex: aliasHex,
-            hexLength: aliasHex.length,
-          },
-          separator: {
-            text: ":",
-            bytes: separatorBytes,
-            hex: separatorHex,
-            hexLength: separatorHex.length,
-          },
-        },
-        totalPayload: {
-          bytes: totalPayloadBytes,
-          hex: payload,
-          hexLength: payload.length,
-          breakdown: {
-            protocolPrefix: protocolPrefixBytes,
-            alias: aliasBytes,
-            separator: separatorBytes,
-            encryptedMessage: encryptedBytes,
-          },
-        },
-        // Add hex encoding analysis
-        hexEncodingAnalysis: {
-          originalBytes: originalMessageBytes,
-          encryptedBytes: encryptedBytes,
-          protocolBytes: protocolPrefixBytes + aliasBytes + separatorBytes,
-          totalBytes: totalPayloadBytes,
-          hexMultiplier: 2, // Each byte becomes 2 hex characters
-          expectedHexLength: totalPayloadBytes * 2,
-          // Add reference to actual transaction
-          actualTransaction: {
-            protocolPrefix: "ciph_msg:1:comm:",
-            alias: "f74137627867",
-            separator: ":",
-            totalBytes: 379, // From actual transaction
-            hexLength: 758, // From actual transaction
-            computeMass: 1791,
-            fee: 0.00001791,
-          },
-        },
-      });
-
-      // Log mass calculation
-      console.log("Mass calculation:", {
-        baseTransactionMass,
-        inputMassTotal: inputMass * numInputs,
-        outputMassTotal: outputMass * numOutputs,
-        sigOpMassTotal: sigOpMass * numSigOps,
-        payloadSize: totalPayloadBytes,
-        computeMass,
-        storageMass,
-        networkMass,
-        numInputs,
-        numOutputs,
-        numSigOps,
-        finalFee: fees / 100000000, // Convert to KAS
-        // Add reference to actual transaction
-        actualTransaction: {
-          computeMass: 1791,
-          fee: 0.00001791,
-        },
-      });
-
-      // Use a direct approach, minimizing string operations on addresses
-      return this.estimateTransactionDetails({
-        address: sendMessage.toAddress,
-        amount: minimumAmount,
-        payload: payload,
-        payloadSize: totalPayloadBytes,
-      });
-    } catch (error) {
-      console.error("Error in estimateSendMessage:", error);
-      throw error;
-    }
-  }
-
-  public async sendMessage(sendMessage: SendMessageArgs): Promise<string> {
+  public async sendMessage(
+    sendMessage: SendMessageArgs
+  ): Promise<TransactionId> {
     this.ensurePasswordSet();
-    const minimumAmount = kaspaToSompi("0.2");
+    // Use custom amount if provided, otherwise default to 0.2 KAS
+    const defaultAmount = kaspaToSompi("0.2");
+    const messageAmount = sendMessage.amount || defaultAmount;
 
-    if (!minimumAmount) {
-      throw new Error("Minimum amount missing");
+    if (!messageAmount) {
+      throw new Error("Message amount missing");
     }
 
     if (!sendMessage.toAddress) {
@@ -929,6 +677,7 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
         .join("");
       payload = prefix + sendMessage.message;
     } else {
+      console.log("ENCRYPT MESSAGE", sendMessage.message);
       // Message needs to be encrypted
       const encryptedMessage = encrypt_message(
         addressString,
@@ -952,7 +701,7 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
       const txId = await this.createTransaction(
         {
           address: destinationAddress,
-          amount: minimumAmount,
+          amount: messageAmount,
           payload: payload,
         },
         sendMessage.password
@@ -961,6 +710,58 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
       return txId;
     } catch (error) {
       console.error("Error sending message:", error);
+      throw error;
+    }
+  }
+
+  public async estimateSendMessageFees(
+    sendMessage: EstimateSendMessageFeesArgs
+  ): Promise<GeneratorSummary> {
+    if (!sendMessage.toAddress) {
+      throw new Error("Destination address is required");
+    }
+
+    if (!sendMessage.message) {
+      throw new Error("Message is required");
+    }
+
+    const destinationAddress = this.ensureAddressPrefix(sendMessage.toAddress);
+    const addressString = destinationAddress.toString();
+
+    // Message needs to be encrypted
+    const encryptedMessage = encrypt_message(
+      addressString,
+      sendMessage.message
+    );
+
+    if (!encryptedMessage) {
+      throw new Error("Failed to encrypt message");
+    }
+
+    const prefix = "ciph_msg";
+    const version = "1";
+    const messageType = "comm";
+    const payload = `${prefix}:${version}:${messageType}:b4e3da89391b:${encryptedMessage.to_hex()}`;
+
+    const payloadHex = payload
+      .split("")
+      .map((c) => c.charCodeAt(0).toString(16).padStart(2, "0"))
+      .join("");
+
+    if (!payload) {
+      throw new Error("Failed to create message payload");
+    }
+
+    try {
+      const summary = await this.estimateTransaction({
+        address: destinationAddress,
+        amount: BigInt(0.2 * 100_000_000),
+        payload: payloadHex,
+      });
+
+      return summary;
+    } catch (error) {
+      console.error("Error estimating transaction fees:", error);
       throw error;
     }
   }
@@ -1092,6 +893,14 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
     const isDirectSelfMessage =
       destinationAddress.toString() === this.receiveAddress?.toString();
 
+    let isMessageTransaction = false;
+    if (transaction.payload) {
+      // Check if this is a message transaction by looking for the message prefix
+      isMessageTransaction = transaction.payload.startsWith(
+        this.MESSAGE_PREFIX_HEX
+      );
+    }
+
     // Check if we have an active conversation with this address
     const messagingStore = useMessagingStore.getState();
     const conversationManager = messagingStore?.conversationManager;
@@ -1109,26 +918,57 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
       });
     }
 
-    // Treat as self-message if either direct self-message or has active conversation
-    const isSelfMessage = isDirectSelfMessage || hasActiveConversation;
+    // Only treat as self-message if it's a message transaction AND either direct self-message or has active conversation
+    const isSelfMessage =
+      isMessageTransaction && (isDirectSelfMessage || hasActiveConversation);
     console.log("Transaction type:", {
       isDirectSelfMessage,
       hasActiveConversation,
+      isMessageTransaction,
       isSelfMessage,
     });
 
-    // For self-messages or active conversations, use receive address as both change and destination
+    // For regular transactions, always use the specified amount and destination
+    // For self-messages, use empty outputs array to only use change output
+    const outputs = isSelfMessage
+      ? []
+      : [new PaymentOutput(destinationAddress, transaction.amount)];
+
     return new Generator({
-      // For self-messages, use receive address as both change and destination
-      changeAddress: isSelfMessage ? destinationAddress : primaryAddress,
+      changeAddress: primaryAddress, // Always use primary address for change
       entries: this.context,
-      // For self-messages, use empty array to only use change output
-      outputs: isSelfMessage
-        ? []
-        : [new PaymentOutput(destinationAddress, transaction.amount)],
+      outputs: outputs,
       payload: transaction.payload,
       networkId: this.networkId,
       priorityFee: BigInt(0),
+    });
+  }
+
+  private _getGeneratorForWithdrawTransaction(
+    transaction: CreateWithdrawTransactionArgs
+  ) {
+    if (!this.isStarted) {
+      throw new Error("Account service is not started");
+    }
+
+    console.log("Using destination address:", transaction.address.toString());
+
+    const isFullBalance = transaction.amount === this.context.balance?.mature;
+
+    const changeAddress = isFullBalance
+      ? new Address(transaction.address.toString())
+      : this.receiveAddress!;
+
+    return new Generator({
+      changeAddress,
+      entries: this.context,
+      // priorityEntries: this.context.getMatureRange(0, this.context.matureLength),
+      outputs: [new PaymentOutput(transaction.address, transaction.amount)],
+      networkId: this.networkId,
+      priorityFee: {
+        amount: BigInt(0),
+        source: FeeSource.ReceiverPays,
+      },
     });
   }
 
@@ -1571,3 +1411,45 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
     }
   }
 }
+
+export const createWithdrawTransaction = async (
+  toAddress: string,
+  amountSompi: bigint
+): Promise<void> => {
+  try {
+    console.log("Sending withdraw transaction:", {
+      toAddress,
+      amountSompi,
+    });
+
+    const walletStore = useWalletStore.getState();
+    const accountService = walletStore.accountService;
+    const password = walletStore.unlockedWallet?.password;
+
+    if (!accountService) {
+      throw new Error("Account service not initialized");
+    }
+
+    if (!password) {
+      throw new Error("Wallet is locked. Please unlock your wallet first.");
+    }
+
+    // Create and send a native transaction (no payload)
+    await accountService.createWithdrawTransaction(
+      {
+        address: new Address(toAddress),
+        amount: amountSompi,
+      },
+      password
+    );
+
+    console.log("Withdraw transaction sent successfully");
+  } catch (error) {
+    console.error("Send withdraw transaction error:", error);
+    throw new Error(
+      error instanceof Error
+        ? error.message
+        : "Failed to send withdraw transaction"
+    );
+  }
+};

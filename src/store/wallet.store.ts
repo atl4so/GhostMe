@@ -1,26 +1,35 @@
 import { create } from "zustand";
 import { KaspaClient } from "../utils/all-in-one";
-import { UnlockedWallet, WalletStorage } from "../utils/wallet-storage";
-import { Address, Mnemonic, UtxoEntryReference } from "kaspa-wasm";
+import { WalletStorage } from "../utils/wallet-storage";
+import {
+  Address,
+  GeneratorSummary,
+  Mnemonic,
+  sompiToKaspaString,
+  UtxoEntryReference,
+} from "kaspa-wasm";
 import { AccountService } from "../service/account-service";
 import { encrypt_message } from "cipher";
-import { fetchAddressTransactions } from "../utils/all-in-one";
 import { useMessagingStore } from "./messaging.store";
-import { formatKasAmount } from "../utils/format";
-import { NetworkType } from "../type/all";
+import { NetworkType } from "../types/all";
+import {
+  WalletDerivationType,
+  UnlockedWallet,
+  WalletBalance,
+} from "../types/wallet.type";
+import { TransactionId } from "../types/transactions";
 
 type WalletState = {
-  wallets: { id: string; name: string; createdAt: string }[];
+  wallets: {
+    id: string;
+    name: string;
+    createdAt: string;
+    derivationType?: WalletDerivationType;
+  }[];
   selectedWalletId: string | null;
   unlockedWallet: UnlockedWallet | null;
   address: Address | null;
-  balance: {
-    mature: number;
-    pending: number;
-    outgoing: number;
-    matureUtxoCount: number;
-    pendingUtxoCount: number;
-  } | null;
+  balance: WalletBalance;
   rpcClient: KaspaClient | null;
   isAccountServiceRunning: boolean;
   accountService: AccountService | null;
@@ -29,20 +38,46 @@ type WalletState = {
   // wallet management
   loadWallets: () => void;
   selectWallet: (walletId: string) => void;
-  createWallet: (name: string, mnemonic: Mnemonic, password: string) => Promise<string>;
+  createWallet: (
+    name: string,
+    mnemonic: Mnemonic,
+    password: string,
+    derivationType?: WalletDerivationType
+  ) => Promise<string>;
   deleteWallet: (walletId: string) => void;
-  unlock: (walletId: string, password: string) => Promise<UnlockedWallet | null>;
+  unlock: (
+    walletId: string,
+    password: string
+  ) => Promise<UnlockedWallet | null>;
   lock: () => void;
+
+  // migration functionality
+  migrateLegacyWallet: (
+    walletId: string,
+    password: string,
+    newName?: string
+  ) => Promise<string>;
 
   // wallet operations
   start: (client: KaspaClient) => Promise<{ receiveAddress: Address }>;
   stop: () => void;
-  sendMessage: (message: string, toAddress: Address, password: string) => Promise<any>;
-  sendPreEncryptedMessage: (preEncryptedHex: string, toAddress: Address, password: string) => Promise<any>;
-  getMatureUtxos: () => any[];
+  sendMessage: (
+    message: string,
+    toAddress: Address,
+    password: string,
+    customAmount?: bigint
+  ) => Promise<TransactionId>;
+  sendPreEncryptedMessage: (
+    preEncryptedHex: string,
+    toAddress: Address,
+    password: string
+  ) => Promise<TransactionId>;
+  getMatureUtxos: () => UtxoEntryReference[];
 
-  // new methods
-  estimateMessageFee: (message: string, toAddress: Address, password: string) => Promise<{ fees: number, finalAmount: number, transactions: number, utxos: number }>;
+  estimateSendMessageFees: (
+    message: string,
+    toAddress: Address
+  ) => Promise<GeneratorSummary>;
 
   // Actions
   setSelectedNetwork: (network: NetworkType) => void;
@@ -74,8 +109,18 @@ export const useWalletStore = create<WalletState>((set, get) => {
       set({ selectedWalletId: walletId });
     },
 
-    createWallet: async (name: string, mnemonic: Mnemonic, password: string) => {
-      const walletId = _walletStorage.create(name, mnemonic, password);
+    createWallet: async (
+      name: string,
+      mnemonic: Mnemonic,
+      password: string,
+      derivationType?: WalletDerivationType
+    ) => {
+      const walletId = _walletStorage.create(
+        name,
+        mnemonic,
+        password,
+        derivationType
+      );
       get().loadWallets();
       return walletId;
     },
@@ -116,25 +161,33 @@ export const useWalletStore = create<WalletState>((set, get) => {
 
         _accountService.on("transactionReceived", async (txDetails) => {
           if (txDetails.payload?.startsWith("636970685f6d73673a")) {
-            const messageOutput = txDetails.outputs.find((output: { amount: number }) => output.amount === 10000000);
-            const recipientAddress = messageOutput?.script_public_key_address || "Unknown";
-            
+            const messageOutput = txDetails.outputs.find(
+              (output: { amount: number }) => output.amount === 10000000
+            );
+            const recipientAddress =
+              messageOutput?.script_public_key_address || "Unknown";
+
             let senderAddress = "Unknown";
             if (txDetails.outputs && txDetails.outputs.length > 1) {
-              const changeOutput = txDetails.outputs.find((output: { amount: number, script_public_key_address: string }) => 
-                output.script_public_key_address !== recipientAddress && output.amount !== 10000000
+              const changeOutput = txDetails.outputs.find(
+                (output: {
+                  amount: number;
+                  script_public_key_address: string;
+                }) =>
+                  output.script_public_key_address !== recipientAddress &&
+                  output.amount !== 10000000
               );
               if (changeOutput) {
                 senderAddress = changeOutput.script_public_key_address;
               }
             }
-            
+
             const myAddress = _accountService?.receiveAddress?.toString() || "";
-            
+
             if (senderAddress === myAddress) {
               return;
             }
-            
+
             const messageData = {
               transactionId: txDetails.transaction_id,
               senderAddress: senderAddress,
@@ -142,14 +195,17 @@ export const useWalletStore = create<WalletState>((set, get) => {
               timestamp: txDetails.block_time,
               payload: txDetails.payload,
               amount: messageOutput?.amount || 0,
-              content: "[New message - click refresh to decrypt]"
+              content: "[New message - click refresh to decrypt]",
             };
-            
+
             if (myAddress) {
               messagingStore.storeMessage(messageData, myAddress);
               messagingStore.loadMessages(myAddress);
-              
-              if (messagingStore.openedRecipient === (senderAddress === myAddress ? recipientAddress : senderAddress)) {
+
+              if (
+                messagingStore.openedRecipient ===
+                (senderAddress === myAddress ? recipientAddress : senderAddress)
+              ) {
                 messagingStore.refreshMessagesOnOpenedRecipient();
               }
             }
@@ -160,17 +216,23 @@ export const useWalletStore = create<WalletState>((set, get) => {
 
         const initialBalance = await _accountService.context.balance;
         if (initialBalance) {
-          const matureUtxos = _accountService.context.getMatureRange(0, _accountService.context.matureLength);
+          const matureUtxos = _accountService.context.getMatureRange(
+            0,
+            _accountService.context.matureLength
+          );
           const pendingUtxos = _accountService.context.getPending();
-          
+
           set({
             balance: {
-              mature: Number(initialBalance.mature) / 100000000,
-              pending: Number(initialBalance.pending) / 100000000,
-              outgoing: Number(initialBalance.outgoing) / 100000000,
+              mature: initialBalance.mature,
+              pending: initialBalance.pending,
+              outgoing: initialBalance.outgoing,
+              matureDisplay: sompiToKaspaString(initialBalance.mature),
+              pendingDisplay: sompiToKaspaString(initialBalance.pending),
+              outgoingDisplay: sompiToKaspaString(initialBalance.outgoing),
               matureUtxoCount: matureUtxos.length,
-              pendingUtxoCount: pendingUtxos.length
-            }
+              pendingUtxoCount: pendingUtxos.length,
+            },
           });
         }
 
@@ -178,7 +240,7 @@ export const useWalletStore = create<WalletState>((set, get) => {
           rpcClient: currentRpcClient,
           address: _accountService.receiveAddress,
           isAccountServiceRunning: true,
-          accountService: _accountService
+          accountService: _accountService,
         });
 
         return wallet;
@@ -198,7 +260,7 @@ export const useWalletStore = create<WalletState>((set, get) => {
         address: null,
         balance: null,
         isAccountServiceRunning: false,
-        accountService: null
+        accountService: null,
       });
     },
 
@@ -221,25 +283,30 @@ export const useWalletStore = create<WalletState>((set, get) => {
 
       _accountService.on("transactionReceived", async (txDetails) => {
         if (txDetails.payload?.startsWith("636970685f6d73673a")) {
-          const messageOutput = txDetails.outputs.find((output: { amount: number }) => output.amount === 10000000);
-          const recipientAddress = messageOutput?.script_public_key_address || "Unknown";
-          
+          const messageOutput = txDetails.outputs.find(
+            (output: { amount: number }) => output.amount === 10000000
+          );
+          const recipientAddress =
+            messageOutput?.script_public_key_address || "Unknown";
+
           let senderAddress = "Unknown";
           if (txDetails.outputs && txDetails.outputs.length > 1) {
-            const changeOutput = txDetails.outputs.find((output: { amount: number, script_public_key_address: string }) => 
-              output.script_public_key_address !== recipientAddress && output.amount !== 10000000
+            const changeOutput = txDetails.outputs.find(
+              (output: { amount: number; script_public_key_address: string }) =>
+                output.script_public_key_address !== recipientAddress &&
+                output.amount !== 10000000
             );
             if (changeOutput) {
               senderAddress = changeOutput.script_public_key_address;
             }
           }
-          
+
           const myAddress = _accountService?.receiveAddress?.toString() || "";
-          
+
           if (senderAddress === myAddress) {
             return;
           }
-          
+
           const messageData = {
             transactionId: txDetails.transaction_id,
             senderAddress: senderAddress,
@@ -247,15 +314,18 @@ export const useWalletStore = create<WalletState>((set, get) => {
             timestamp: txDetails.block_time,
             payload: txDetails.payload,
             amount: messageOutput?.amount || 0,
-            content: "[New message - click refresh to decrypt]"
+            content: "[New message - click refresh to decrypt]",
           };
-          
+
           const messagingStore = useMessagingStore.getState();
           if (myAddress) {
             messagingStore.storeMessage(messageData, myAddress);
             messagingStore.loadMessages(myAddress);
-            
-            if (messagingStore.openedRecipient === (senderAddress === myAddress ? recipientAddress : senderAddress)) {
+
+            if (
+              messagingStore.openedRecipient ===
+              (senderAddress === myAddress ? recipientAddress : senderAddress)
+            ) {
               messagingStore.refreshMessagesOnOpenedRecipient();
             }
           }
@@ -266,17 +336,23 @@ export const useWalletStore = create<WalletState>((set, get) => {
 
       const initialBalance = await _accountService.context.balance;
       if (initialBalance) {
-        const matureUtxos = _accountService.context.getMatureRange(0, _accountService.context.matureLength);
+        const matureUtxos = _accountService.context.getMatureRange(
+          0,
+          _accountService.context.matureLength
+        );
         const pendingUtxos = _accountService.context.getPending();
-        
+
         set({
           balance: {
-            mature: Number(initialBalance.mature) / 100000000,
-            pending: Number(initialBalance.pending) / 100000000,
-            outgoing: Number(initialBalance.outgoing) / 100000000,
+            mature: initialBalance.mature,
+            pending: initialBalance.pending,
+            outgoing: initialBalance.outgoing,
+            matureDisplay: sompiToKaspaString(initialBalance.mature),
+            outgoingDisplay: sompiToKaspaString(initialBalance.outgoing),
+            pendingDisplay: sompiToKaspaString(initialBalance.pending),
             matureUtxoCount: matureUtxos.length,
-            pendingUtxoCount: pendingUtxos.length
-          }
+            pendingUtxoCount: pendingUtxos.length,
+          },
         });
       }
 
@@ -284,7 +360,7 @@ export const useWalletStore = create<WalletState>((set, get) => {
         rpcClient: client,
         address: _accountService.receiveAddress,
         isAccountServiceRunning: true,
-        accountService: _accountService
+        accountService: _accountService,
       });
 
       return { receiveAddress: _accountService.receiveAddress! };
@@ -299,7 +375,24 @@ export const useWalletStore = create<WalletState>((set, get) => {
       set({ rpcClient: null, address: null, isAccountServiceRunning: false });
     },
 
-    sendMessage: async (message: string, toAddress: Address, password: string) => {
+    estimateSendMessageFees: async (message: string, toAddress: Address) => {
+      const state = get();
+      if (!state.unlockedWallet || !state.accountService) {
+        throw new Error("Wallet not unlocked or account service not running");
+      }
+
+      return state.accountService.estimateSendMessageFees({
+        message,
+        toAddress,
+      });
+    },
+
+    sendMessage: async (
+      message: string,
+      toAddress: Address,
+      password: string,
+      customAmount?: bigint
+    ) => {
       const state = get();
       if (!state.unlockedWallet || !state.accountService) {
         throw new Error("Wallet not unlocked or account service not running");
@@ -307,47 +400,60 @@ export const useWalletStore = create<WalletState>((set, get) => {
 
       try {
         // Check if this is a handshake message
-        if (message.startsWith('ciph_msg:') && message.includes(':handshake:')) {
-          // Parse the handshake payload
-          const parts = message.split(':');
-          const jsonPart = parts.slice(3).join(':');
-          const handshakePayload = JSON.parse(jsonPart);
-
+        if (
+          message.startsWith("ciph_msg:") &&
+          message.includes(":handshake:")
+        ) {
           // Always send handshake messages to the recipient's address
-          console.log('Sending handshake message to:', toAddress.toString());
-          const encryptedMessage = await encrypt_message(toAddress.toString(), message);
+          console.log("Sending handshake message to:", toAddress.toString());
+          const encryptedMessage = await encrypt_message(
+            toAddress.toString(),
+            message
+          );
           if (!encryptedMessage) {
             throw new Error("Failed to encrypt handshake message");
-      }
+          }
           return await state.accountService.sendMessage({
             message: encryptedMessage.to_hex(),
             toAddress,
-            password
+            password,
+            amount: customAmount,
           });
         }
 
         // For regular messages, send to recipient
-        console.log('Sending regular message to recipient:', toAddress.toString());
-        const encryptedMessage = await encrypt_message(toAddress.toString(), message);
+        console.log(
+          "Sending regular message to recipient:",
+          toAddress.toString()
+        );
+        const encryptedMessage = await encrypt_message(
+          toAddress.toString(),
+          message
+        );
         if (!encryptedMessage) {
           throw new Error("Failed to encrypt message");
         }
         return await state.accountService.sendMessage({
           message: encryptedMessage.to_hex(),
           toAddress,
-          password
+          password,
+          amount: customAmount,
         });
       } catch (error) {
         console.error("Error sending message:", error);
         throw error;
       }
     },
-    
+
     sendPreEncryptedMessage: (preEncryptedHex, toAddress, password) => {
       if (!_accountService) {
         throw Error("Account service not initialized.");
       }
-      return _accountService.sendPreEncryptedMessage(toAddress, preEncryptedHex, password);
+      return _accountService.sendPreEncryptedMessage(
+        toAddress,
+        preEncryptedHex,
+        password
+      );
     },
 
     getMatureUtxos: () => {
@@ -357,38 +463,9 @@ export const useWalletStore = create<WalletState>((set, get) => {
       return _accountService.getMatureUtxos();
     },
 
-    estimateMessageFee: async (message, toAddress, password) => {
-      if (!_accountService) {
-        throw new Error("Account service not initialized.");
-      }
-      
-      try {
-        const result = await _accountService.estimateSendMessage({
-          message,
-          toAddress,
-          password
-        });
-        
-        return result;
-      } catch (error) {
-        console.error("Error estimating message fee, using fallback estimate:", error);
-        
-        const baseTransactionSize = 200;
-        const bytesPerChar = 4;
-        const estimatedSize = baseTransactionSize + (message.length * bytesPerChar);
-        const estimatedFee = 0.0001 + (estimatedSize * 0.00001);
-        
-                  return {
-            fees: estimatedFee,
-            finalAmount: 0.2,
-            transactions: 1,
-            utxos: 1
-          };
-      }
-    },
+    setSelectedNetwork: (network: NetworkType) =>
+      set({ selectedNetwork: network }),
 
-    setSelectedNetwork: (network: NetworkType) => set({ selectedNetwork: network }),
-    
     setRpcClient: (client: KaspaClient | null) => {
       if (!client) {
         // If clearing the client, stop the service first
@@ -401,6 +478,20 @@ export const useWalletStore = create<WalletState>((set, get) => {
         // Update the RPC client
         set({ rpcClient: client });
       }
+    },
+
+    migrateLegacyWallet: async (
+      walletId: string,
+      password: string,
+      newName?: string
+    ) => {
+      const newWalletId = await _walletStorage.migrateLegacyWallet(
+        walletId,
+        password,
+        newName
+      );
+      get().loadWallets();
+      return newWalletId;
     },
   };
 });
