@@ -1,4 +1,4 @@
-import { FC, useMemo, useEffect, useRef } from "react";
+import { FC, useMemo } from "react";
 import { NetworkType } from "../types/all";
 import { Menu, MenuButton, MenuItems, MenuItem } from "@headlessui/react";
 import { getDisplayableNetworkFromNetworkString } from "../utils/network-display";
@@ -14,35 +14,6 @@ export const NetworkSelector: FC<NetworkSelectorProps> = ({
   selectedNetwork,
   isConnected,
 }) => {
-  const menuRef = useRef<HTMLDivElement>(null);
-
-  // Set default network to mainnet on component mount or if selectedNetwork is null/invalid
-  useEffect(() => {
-    if (
-      !selectedNetwork ||
-      selectedNetwork !==
-        (import.meta.env.VITE_DEFAULT_KASPA_NETWORK ?? "mainnet")
-    ) {
-      onNetworkChange(selectedNetwork ?? "mainnet");
-    }
-  }, [selectedNetwork, onNetworkChange]);
-
-  // Add passive wheel event listeners
-  useEffect(() => {
-    const menuElement = menuRef.current;
-    if (!menuElement) return;
-
-    const options = { passive: true };
-    const handler = (e: WheelEvent) => {
-      // Handle wheel event if needed
-    };
-
-    menuElement.addEventListener("wheel", handler, options);
-    return () => {
-      menuElement.removeEventListener("wheel", handler);
-    };
-  }, []);
-
   const networkDisplay = useMemo(() => {
     if (!isConnected) {
       return "Connecting...";
@@ -65,31 +36,36 @@ export const NetworkSelector: FC<NetworkSelectorProps> = ({
   }, []);
 
   return (
-    <div className="network-selector-container" ref={menuRef}>
-      <Menu>
-        <MenuButton className="network-badge">
-          <span
-            className={`connection-dot ${
-              isConnected ? "connected" : "disconnected"
-            }`}
-          />
-          {networkDisplay}
-        </MenuButton>
-        <MenuItems className="network-selector" anchor="bottom">
-          {allowedNetworks.map((allowedNetwork) => (
-            <MenuItem key={allowedNetwork.id}>
-              <div
-                onClick={() => onNetworkChange(allowedNetwork.id)}
-                className={`${
-                  selectedNetwork === allowedNetwork.id ? "active" : ""
-                } network-option`}
-              >
-                {allowedNetwork.displayableString}
-              </div>
-            </MenuItem>
-          ))}
-        </MenuItems>
-      </Menu>
-    </div>
+    <Menu>
+      <MenuButton className="inline-flex min-w-[100px] cursor-pointer items-center justify-center gap-2 rounded bg-[var(--accent-blue)] px-3 py-1 text-sm font-medium text-white transition-colors duration-200">
+        <span
+          className={`inline-block h-3 w-3 rounded-full ${
+            isConnected
+              ? "bg-[var(--accent-green)] shadow-[0_0_4px_var(--accent-green)]"
+              : "bg-[#ef4444] shadow-[0_0_4px_#ef4444]"
+          }`}
+        />
+        {networkDisplay}
+      </MenuButton>
+      <MenuItems
+        className="absolute top-full left-0 z-10 min-w-[140px] border border-[var(--border-color)] bg-[var(--secondary-bg)] shadow-md"
+        anchor="bottom"
+      >
+        {allowedNetworks.map((allowedNetwork) => (
+          <MenuItem key={allowedNetwork.id}>
+            <div
+              onClick={() => onNetworkChange(allowedNetwork.id)}
+              className={`block w-full cursor-pointer border-none bg-none px-3 py-2 text-left text-[0.8125rem] text-[var(--text-primary)] transition-colors duration-200 ${
+                selectedNetwork === allowedNetwork.id
+                  ? "bg-[var(--accent-blue)] text-white"
+                  : "hover:bg-[var(--primary-bg)]"
+              }`}
+            >
+              {allowedNetwork.displayableString}
+            </div>
+          </MenuItem>
+        ))}
+      </MenuItems>
+    </Menu>
   );
 };

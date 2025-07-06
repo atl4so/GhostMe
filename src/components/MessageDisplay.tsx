@@ -1,48 +1,86 @@
 import { FC, useState, useEffect, useRef } from "react";
 import { Message as MessageType } from "../types/all";
 import { decodePayload } from "../utils/all-in-one";
-import { formatKasAmount } from "../utils/format";
-import {
-  decrypt_message,
-  decrypt_message_with_bytes,
-  decrypt_with_secret_key,
-} from "cipher";
 import { useWalletStore } from "../store/wallet.store";
 import { WalletStorage } from "../utils/wallet-storage";
 import { CipherHelper } from "../utils/cipher-helper";
 import { useMessagingStore } from "../store/messaging.store";
 import { HandshakeResponse } from "./HandshakeResponse";
+import { KasIcon } from "./icons/KasCoin";
+import { PaperClipIcon } from "@heroicons/react/24/solid";
+import clsx from "clsx";
 
 type MessageDisplayProps = {
   message: MessageType;
   isOutgoing: boolean;
+  showTimestamp?: boolean;
 };
 
 export const MessageDisplay: FC<MessageDisplayProps> = ({
   message,
   isOutgoing,
+  showTimestamp,
 }) => {
+  const [showMeta, setShowMeta] = useState(false);
+
   const {
     senderAddress,
     recipientAddress,
     timestamp,
     payload,
     content,
-    amount,
     fee,
     transactionId,
     fileData,
   } = message;
 
-  const displayAddress = isOutgoing ? recipientAddress : senderAddress;
   const walletStore = useWalletStore();
   const messagingStore = useMessagingStore();
   const mounted = useRef(true);
+
+  const isRecent = Date.now() - timestamp < 12 * 60 * 60 * 1000; // if message is younger than 12 hours, its recent
+  const date = new Date(timestamp);
+
+  // if expanded OR stale, full date+time; otherwise just HH:MM
+  const displayStamp =
+    showMeta || !isRecent
+      ? date.toLocaleString()
+      : date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 
   // Check if this is a handshake message
   const isHandshake =
     (payload?.startsWith("ciph_msg:") && payload?.includes(":handshake:")) ||
     (content?.startsWith("ciph_msg:") && content?.includes(":handshake:"));
+
+  // Check if this is a payment message by checking the hex payload OR decrypted content
+  const isPayment = (() => {
+    // First check if it's a hex payload starting with ciph_msg prefix
+    if (payload) {
+      const prefix = "636970685f6d73673a"; // hex for "ciph_msg:"
+      if (payload.startsWith(prefix)) {
+        // Extract the message part and check for payment prefix
+        const messageHex = payload.substring(prefix.length);
+        const paymentPrefix = "313a7061796d656e743a"; // "1:payment:" in hex
+        if (messageHex.startsWith(paymentPrefix)) {
+          return true;
+        }
+      }
+    }
+
+    // Also check if the content is already decrypted payment JSON
+    if (content) {
+      try {
+        const parsed = JSON.parse(content);
+        if (parsed.type === "payment") {
+          return true;
+        }
+      } catch (e) {
+        // Not JSON, continue checking
+      }
+    }
+
+    return false;
+  })();
 
   // Get conversation if it's a handshake
   const conversation = isHandshake
@@ -115,6 +153,84 @@ export const MessageDisplay: FC<MessageDisplayProps> = ({
     return null; // Don't show amount for any messages
   };
 
+  // Render payment message content
+  const renderPaymentMessage = () => {
+    if (isDecrypting) {
+      return (
+        <div className="rounded-md bg-teal-50 px-3 py-2 text-xs text-gray-600 italic">
+          Decrypting payment message...
+        </div>
+      );
+    }
+
+    // For payment messages, we'll only show the UI elements, not the raw content
+    const messageToRender = content;
+
+    try {
+      if (messageToRender) {
+        const paymentPayload = JSON.parse(messageToRender);
+
+        if (paymentPayload.type === "payment") {
+          // Check if message is empty or just whitespace
+          const hasMessage =
+            paymentPayload.message && paymentPayload.message.trim();
+
+          return (
+            <div className={clsx("flex items-center gap-1 p-2")}>
+              <div
+                className={clsx(
+                  "mr-2 flex h-18 w-18 animate-pulse items-center justify-center drop-shadow-[0_0_20px_rgba(112,199,186,0.7)]"
+                )}
+              >
+                <KasIcon
+                  className="h-18 w-18 scale-140 drop-shadow-[0_0_15px_rgba(112,199,186,0.8)]"
+                  circleClassName="fill-white"
+                  kClassName="fill-[#70C7BA]"
+                />
+              </div>
+              <div className="flex-1">
+                {hasMessage && (
+                  <div className="mb-1 text-sm font-medium break-all text-white drop-shadow-sm">
+                    {paymentPayload.message}
+                  </div>
+                )}
+                <div className="text-xs font-semibold text-white/80 drop-shadow-sm">
+                  {isOutgoing ? "Sent" : "Received"} {paymentPayload.amount} KAS
+                </div>
+              </div>
+            </div>
+          );
+        }
+      }
+    } catch (error) {
+      console.warn("Could not parse payment message:", error);
+      // If we can't parse it but we know it's a payment message,
+      // show the raw content for debugging
+      console.log("Raw payment content:", messageToRender);
+    }
+
+    // Fallback to showing basic payment info
+    return (
+      <div className="flex items-center gap-3 p-4">
+        <div className="mr-1 flex h-10 min-w-10 items-center justify-center drop-shadow-[0_0_20px_rgba(112,199,186,0.7)]">
+          <KasIcon
+            className="h-10 w-10 drop-shadow-[0_0_15px_rgba(112,199,186,0.8)]"
+            circleClassName="fill-white"
+            kClassName="fill-[#70C7BA]"
+          />
+        </div>
+        <div className="flex-1">
+          <div className="mb-1 text-sm font-medium text-white drop-shadow-sm">
+            Payment message
+          </div>
+          <div className="text-xs font-semibold text-white/80 drop-shadow-sm">
+            {isOutgoing ? "Sent" : "Received"} payment
+          </div>
+        </div>
+      </div>
+    );
+  };
+
   // Parse and render message content
   const renderMessageContent = () => {
     // If this is a handshake message and we found the conversation
@@ -134,17 +250,27 @@ export const MessageDisplay: FC<MessageDisplayProps> = ({
       return conversation.status === "active"
         ? "Handshake completed"
         : conversation.initiatedByMe
-        ? "Handshake sent"
-        : "Handshake received";
+          ? "Handshake sent"
+          : "Handshake received";
+    }
+
+    // If this is a payment message, handle it specially
+    if (isPayment) {
+      return renderPaymentMessage();
     }
 
     // Wait for decryption attempt before showing content
     if (isDecrypting) {
-      return <div className="decrypting">Decrypting message...</div>;
+      return (
+        <div className="rounded-md bg-gray-50 px-3 py-2 text-xs text-gray-600 italic">
+          Decrypting message...
+        </div>
+      );
     }
 
     // Only use decrypted content if decryption was attempted and successful
-    let messageToRender = (decryptionAttempted && decryptedContent) || content;
+    const messageToRender =
+      (decryptionAttempted && decryptedContent) || content;
 
     // Handle file/image messages
     if (fileData && fileData.type === "file") {
@@ -153,17 +279,19 @@ export const MessageDisplay: FC<MessageDisplayProps> = ({
           <img
             src={fileData.content}
             alt={fileData.name}
-            className="message-image"
+            className="mt-2 block max-w-full rounded-lg"
           />
         );
       }
       return (
         <div className="file-message">
           <div className="file-info">
-            📎 {fileData.name} ({Math.round(fileData.size / 1024)}KB)
+            <PaperClipIcon className="h-4 w-4" /> {fileData.name} (
+            {Math.round(fileData.size / 1024)}
+            KB)
           </div>
           <button
-            className="download-button"
+            className="mt-1 cursor-pointer rounded border border-[rgba(59,130,246,0.3)] bg-[rgba(59,130,246,0.2)] px-3 py-1 text-sm text-[var(--text-primary)] transition-colors duration-200 hover:bg-[rgba(59,130,246,0.3)]"
             onClick={() => {
               const link = document.createElement("a");
               link.href = fileData.content;
@@ -187,18 +315,18 @@ export const MessageDisplay: FC<MessageDisplayProps> = ({
               key={`img-${transactionId}`}
               src={parsedContent.content}
               alt={parsedContent.name}
-              className="message-image"
+              className="mt-2 block max-w-full rounded-lg"
             />
           );
         }
         return (
           <div key={`file-${transactionId}`} className="file-message">
             <div className="file-info">
-              📎 {parsedContent.name} (
+              <PaperClipIcon className="h-4 w-4" /> {parsedContent.name} (
               {Math.round((parsedContent.size || 0) / 1024)}KB)
             </div>
             <button
-              className="download-button"
+              className="mt-1 cursor-pointer rounded border border-[rgba(59,130,246,0.3)] bg-[rgba(59,130,246,0.2)] px-3 py-1 text-sm text-[var(--text-primary)] transition-colors duration-200 hover:bg-[rgba(59,130,246,0.3)]"
               onClick={() => {
                 const link = document.createElement("a");
                 link.href = parsedContent.content;
@@ -332,24 +460,54 @@ export const MessageDisplay: FC<MessageDisplayProps> = ({
   }, []);
 
   return (
-    <div className={`message ${isOutgoing ? "outgoing" : "incoming"}`}>
-      <div className="message-header">
-        <div className="message-timestamp">
-          {new Date(timestamp).toLocaleString()}
+    <div
+      className={clsx(
+        "my-2 flex w-full",
+        isOutgoing
+          ? "justify-end pr-0.5 sm:pr-2"
+          : "justify-start pl-0.5 sm:pl-2"
+      )}
+    >
+      <div
+        onClick={() => setShowMeta((prev) => !prev)}
+        className={clsx(
+          "relative z-0 mb-4 max-w-[70%] cursor-pointer px-4 py-3 text-left break-words hyphens-auto",
+          isOutgoing
+            ? "rounded-2xl rounded-br-none bg-[#007aff] text-white"
+            : "rounded-2xl rounded-bl-none bg-[var(--secondary-bg)]"
+        )}
+      >
+        {(showMeta || showTimestamp) && (
+          <div className="mb-[6px] flex items-center justify-between truncate text-[0.8em]">
+            <div className="opacity-70">{displayStamp}</div>
+          </div>
+        )}
+
+        <div className="my-2 text-[1em] leading-[1.4]">
+          {renderMessageContent()}
         </div>
-      </div>
-      <div className="message-content">{renderMessageContent()}</div>
-      <div className="message-footer">
-        {formatAmountAndFee()}
-        {transactionId && (
-          <a
-            href={getExplorerUrl(transactionId)}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="transaction-link"
+
+        {showMeta && (
+          <div
+            className={clsx(
+              "mt-[6px] text-[0.75em] whitespace-nowrap opacity-80",
+              isOutgoing
+                ? "flex flex-col items-start space-y-1"
+                : "flex flex-col items-start space-x-4 sm:flex-row sm:items-center sm:justify-between"
+            )}
           >
-            View Transaction
-          </a>
+            {formatAmountAndFee()}
+            {transactionId && (
+              <a
+                href={getExplorerUrl(transactionId)}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="transaction-link"
+              >
+                View Transaction
+              </a>
+            )}
+          </div>
         )}
       </div>
     </div>

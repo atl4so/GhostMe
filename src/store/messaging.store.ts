@@ -78,11 +78,7 @@ interface MessagingState {
   processHandshake: (
     senderAddress: string,
     payload: string
-  ) => Promise<{
-    isNewHandshake: boolean;
-    requiresResponse: boolean;
-    conversation: Conversation;
-  }>;
+  ) => Promise<unknown>;
   getActiveConversations: () => Conversation[];
   getPendingConversations: () => PendingConversation[];
 
@@ -333,10 +329,10 @@ export const useMessagingStore = create<MessagingState>((set, g) => ({
 
         // Process handshake if we're the recipient or if this is a response to our handshake
         if (
-          message.recipientAddress === walletAddress ||
-          handshakePayload.recipientAddress === walletAddress ||
+          message.recipientAddress === walletAddress || // received handshake
+          handshakePayload.recipientAddress === walletAddress || // legacy safety
           (handshakePayload.isResponse &&
-            message.senderAddress === handshakePayload.recipientAddress)
+            message.senderAddress === walletAddress) // our own response
         ) {
           console.log("Processing handshake message:", {
             senderAddress: message.senderAddress,
@@ -493,10 +489,6 @@ export const useMessagingStore = create<MessagingState>((set, g) => ({
   },
   setIsCreatingNewChat: (isCreatingNewChat) => {
     set({ isCreatingNewChat });
-
-    if (isCreatingNewChat) {
-      set({ openedRecipient: null, messagesOnOpenedRecipient: [] });
-    }
   },
   exportMessages: async (wallet, password) => {
     try {
@@ -505,18 +497,6 @@ export const useMessagingStore = create<MessagingState>((set, g) => ({
       const messagesMap = JSON.parse(
         localStorage.getItem("kaspa_messages_by_wallet") || "{}"
       );
-
-      // Create backup object with metadata
-      const backup = {
-        version: "1.0",
-        timestamp: Date.now(),
-        type: "kaspa-messages-backup",
-        data: messagesMap,
-        conversations: {
-          active: g().conversationManager?.getActiveConversations() || [],
-          pending: g().conversationManager?.getPendingConversations() || [],
-        },
-      };
 
       console.log("Getting private key generator...");
       const privateKeyGenerator = WalletStorage.getPrivateKeyGenerator(
@@ -536,7 +516,28 @@ export const useMessagingStore = create<MessagingState>((set, g) => ({
       console.log("Using network type:", networkType);
 
       const receiveAddress = receiveKey.toAddress(networkType);
-      console.log("Using receive address:", receiveAddress.toString());
+      const walletAddress = receiveAddress.toString();
+      console.log("Using receive address:", walletAddress);
+
+      // Export nicknames for this wallet
+      const nicknameStorageKey = `contact_nicknames_${walletAddress}`;
+      const nicknames = JSON.parse(
+        localStorage.getItem(nicknameStorageKey) || "{}"
+      );
+      console.log("Exporting nicknames:", nicknames);
+
+      // Create backup object with metadata
+      const backup = {
+        version: "1.0",
+        timestamp: Date.now(),
+        type: "kaspa-messages-backup",
+        data: messagesMap,
+        nicknames: nicknames,
+        conversations: {
+          active: g().conversationManager?.getActiveConversations() || [],
+          pending: g().conversationManager?.getPendingConversations() || [],
+        },
+      };
 
       console.log("Converting backup to string...");
       const backupStr = JSON.stringify(backup);
@@ -653,6 +654,27 @@ export const useMessagingStore = create<MessagingState>((set, g) => ({
       const receiveAddress = privateKey.toAddress(networkType);
       const currentAddress = receiveAddress.toString();
       console.log("Using receive address:", currentAddress);
+
+      // Restore nicknames if they exist in the backup
+      if (decryptedData.nicknames) {
+        console.log("Restoring nicknames...");
+        const nicknameStorageKey = `contact_nicknames_${currentAddress}`;
+        const existingNicknames = JSON.parse(
+          localStorage.getItem(nicknameStorageKey) || "{}"
+        );
+
+        // Merge existing nicknames with backup nicknames (backup takes precedence)
+        const mergedNicknames = {
+          ...existingNicknames,
+          ...decryptedData.nicknames,
+        };
+
+        localStorage.setItem(
+          nicknameStorageKey,
+          JSON.stringify(mergedNicknames)
+        );
+        console.log("Nicknames restored:", mergedNicknames);
+      }
 
       // Restore conversations if they exist in the backup
       if (decryptedData.conversations) {
@@ -814,19 +836,18 @@ export const useMessagingStore = create<MessagingState>((set, g) => ({
     }
 
     // Create the handshake payload
-    const { payload, conversation } = await manager.initiateHandshake(
-      recipientAddress
-    );
+    const { payload, conversation } =
+      await manager.initiateHandshake(recipientAddress);
 
     // Send the handshake message
     console.log("Sending handshake message to:", recipientAddress);
     try {
-      const txId = await walletStore.sendMessage(
-        payload,
-        new Address(recipientAddress),
-        walletStore.unlockedWallet.password,
-        customAmount // Pass custom amount to sendMessage
-      );
+      const txId = await walletStore.sendMessage({
+        message: payload,
+        toAddress: new Address(recipientAddress),
+        password: walletStore.unlockedWallet.password,
+        customAmount,
+      });
 
       console.log("Handshake message sent, transaction ID:", txId);
 
@@ -924,18 +945,21 @@ export const useMessagingStore = create<MessagingState>((set, g) => ({
         console.log("Valid Kaspa address created:", kaspaAddress.toString());
 
         // Send the handshake response
-        const txId = await walletStore.sendMessage(
-          messageContent,
-          kaspaAddress,
-          walletStore.unlockedWallet.password
-        );
+        const txId = await walletStore.sendMessage({
+          message: messageContent,
+          toAddress: kaspaAddress,
+          password: walletStore.unlockedWallet.password,
+        });
 
         // Update the conversation in the manager
         const conversation = manager.getConversationByAddress(recipientAddress);
         if (conversation) {
           conversation.status = "active";
           conversation.lastActivity = Date.now();
-          manager.updateConversation({ ...conversation, status: "active" });
+          manager.updateConversation({
+            ...conversation,
+            status: "active",
+          });
         }
 
         // Update the handshake status in the store
@@ -943,7 +967,11 @@ export const useMessagingStore = create<MessagingState>((set, g) => ({
           ...state,
           handshakes: state.handshakes.map((h) =>
             h.conversationId === handshake.conversationId
-              ? { ...h, status: "active", lastActivity: Date.now() }
+              ? {
+                  ...h,
+                  status: "active",
+                  lastActivity: Date.now(),
+                }
               : h
           ),
         }));

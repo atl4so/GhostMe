@@ -2,52 +2,82 @@ import { FC, useCallback, useEffect, useRef, useState } from "react";
 import { useMessagingStore } from "../store/messaging.store";
 import { Message } from "../types/all";
 import { unknownErrorToErrorLike } from "../utils/errors";
-import { Input } from "@headlessui/react";
+import {
+  Popover,
+  PopoverButton,
+  PopoverPanel,
+  Transition,
+  Textarea,
+} from "@headlessui/react";
 import { useWalletStore } from "../store/wallet.store";
 import { Address } from "kaspa-wasm";
 import { formatKasAmount } from "../utils/format";
+import {
+  PaperClipIcon,
+  PaperAirplaneIcon,
+  PlusIcon,
+  ChevronUpIcon,
+  ChevronDownIcon,
+} from "@heroicons/react/24/outline";
+import { toast } from "../utils/toast";
+import { SendPayment } from "./SendPayment";
+import clsx from "clsx";
+import { PriorityFeeSelector } from "../components/PriorityFeeSelector";
+import { PriorityFeeConfig } from "../types/all";
+import { FeeSource } from "kaspa-wasm";
+import { useModals } from "../context/ModalContext";
+import { Modal } from "../components/Common/modal";
+import { Button } from "../components/Common/Button";
+import { ExclamationTriangleIcon } from "@heroicons/react/24/outline";
+import { InformationCircleIcon } from "@heroicons/react/24/outline";
+import { MAX_PAYLOAD_SIZE } from "../config/constants";
+import { prepareFileForUpload } from "../utils/upload-file-handler";
 
-type SendMessageFormProps = unknown;
+type SendMessageFormProps = {
+  onExpand?: () => void;
+};
 
-export const SendMessageForm: FC<SendMessageFormProps> = () => {
+// Arbritary fee levels to colour the fee indicator in chat
+const FEE_LEVELS = [
+  { limit: 0.00002, classes: "text-green-400 border-green-400" },
+  { limit: 0.00005, classes: "text-blue-400  border-blue-400" },
+  { limit: 0.0005, classes: "text-yellow-400 border-yellow-400" },
+  { limit: 0.001, classes: "text-orange-400 border-orange-400" },
+  { limit: Infinity, classes: "text-red-400 border-red-400" },
+];
+
+function getFeeClasses(fee: number) {
+  return FEE_LEVELS.find(({ limit }) => fee <= limit)!.classes;
+}
+
+export const SendMessageForm: FC<SendMessageFormProps> = ({ onExpand }) => {
   const openedRecipient = useMessagingStore((s) => s.openedRecipient);
   const walletStore = useWalletStore();
-  const isCreatingNewChat = useMessagingStore((s) => s.isCreatingNewChat);
   const [feeEstimate, setFeeEstimate] = useState<number | null>(null);
   const [isEstimating, setIsEstimating] = useState(false);
-  const [recipient, setRecipient] = useState("");
   const [message, setMessage] = useState("");
   const [isUploading, setIsUploading] = useState(false);
+  const [priorityFee, setPriorityFee] = useState<PriorityFeeConfig>({
+    amount: BigInt(0),
+    source: FeeSource.SenderPays,
+  });
+
+  const [isExpanded, setIsExpanded] = useState(false);
+  const { isOpen, closeModal, openModal } = useModals();
 
   const messageStore = useMessagingStore();
 
-  const recipientInputRef = useRef<HTMLInputElement | null>(null);
-  const messageInputRef = useRef<HTMLInputElement | null>(null);
+  const messageInputRef = useRef<HTMLTextAreaElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  useEffect(() => {
-    console.log("Opened recipient:", openedRecipient);
-
-    if (openedRecipient && recipientInputRef.current) {
-      recipientInputRef.current.value = openedRecipient;
-      setRecipient(openedRecipient);
-      messageInputRef.current?.focus();
-    }
-  }, [openedRecipient]);
+  const openFileDialog = () => fileInputRef.current?.click();
 
   useEffect(() => {
-    if (
-      isCreatingNewChat &&
-      recipientInputRef.current &&
-      messageInputRef.current
-    ) {
-      recipientInputRef.current.value = "";
+    if (messageInputRef.current) {
       messageInputRef.current.value = "";
-      setRecipient("");
       setMessage("");
-      recipientInputRef.current.focus();
     }
-  }, [isCreatingNewChat]);
+  }, []);
 
   const estimateFee = useCallback(async () => {
     if (!walletStore.unlockedWallet) {
@@ -55,7 +85,7 @@ export const SendMessageForm: FC<SendMessageFormProps> = () => {
       return;
     }
 
-    if (!message || !recipient) {
+    if (!message || !openedRecipient) {
       console.log("Cannot estimate fee: missing message or recipient");
       return;
     }
@@ -63,13 +93,19 @@ export const SendMessageForm: FC<SendMessageFormProps> = () => {
     try {
       console.log("Estimating fee for message:", {
         length: message.length,
-        recipient,
+        openedRecipient,
+        priorityFee: {
+          amount: priorityFee.amount.toString(),
+          feerate: priorityFee.feerate || "none",
+          source: priorityFee.source,
+        },
       });
 
       setIsEstimating(true);
       const estimate = await walletStore.estimateSendMessageFees(
         message,
-        new Address(recipient)
+        new Address(openedRecipient),
+        priorityFee
       );
 
       console.log("Fee estimate received:", estimate);
@@ -80,37 +116,39 @@ export const SendMessageForm: FC<SendMessageFormProps> = () => {
       setIsEstimating(false);
       setFeeEstimate(null);
     }
-  }, [walletStore, message, recipient]);
+  }, [walletStore, message, openedRecipient, priorityFee]);
 
-  // Use effect to trigger fee estimation when message or recipient changes
+  // Use effect to trigger fee estimation when message, recipient, or priority fee changes
   useEffect(() => {
     const delayEstimation = setTimeout(() => {
-      if (recipient && message) {
+      if (openedRecipient && message) {
         console.log("Triggering fee estimation after delay");
         estimateFee();
       }
     }, 500);
 
     return () => clearTimeout(delayEstimation);
-  }, [message, recipient, estimateFee]);
+  }, [message, openedRecipient, priorityFee, estimateFee]);
 
-  const onSendClicked = useCallback(async () => {
+  const sendMessage = useCallback(async () => {
+    const recipient = openedRecipient;
     if (!walletStore.address) {
-      alert("Shouldn't occurs, no selected address");
+      toast.error("Unexpected error: No selected address.");
       return;
     }
 
     if (!walletStore.unlockedWallet) {
-      alert("Shouldn't occurs, no unlocked wallet");
+      toast.error("Wallet is locked. Please unlock your wallet first.");
       return;
     }
 
     if (!message) {
-      alert("Please enter a message");
+      toast.error("Please enter a message.");
       return;
     }
-    if (!recipient) {
-      alert("Please enter a recipient address");
+
+    if (recipient === null) {
+      toast.error("Please enter a recipient address.");
       return;
     }
 
@@ -123,7 +161,7 @@ export const SendMessageForm: FC<SendMessageFormProps> = () => {
       // Check if we have an active conversation with this recipient
       const activeConversations = messageStore.getActiveConversations();
       const existingConversation = activeConversations.find(
-        (conv) => conv.kaspaAddress === recipient
+        (conv) => conv.kaspaAddress === openedRecipient
       );
 
       let messageToSend = message;
@@ -158,7 +196,7 @@ export const SendMessageForm: FC<SendMessageFormProps> = () => {
             content: parsedContent.content,
           });
         }
-      } catch (e) {
+      } catch {
         // Not a file message, use message as is
       }
 
@@ -167,8 +205,9 @@ export const SendMessageForm: FC<SendMessageFormProps> = () => {
       // If we have an active conversation, use the context-aware sending
       if (existingConversation && existingConversation.theirAlias) {
         console.log("Sending message with conversation context:", {
-          recipient,
+          openedRecipient,
           theirAlias: existingConversation.theirAlias,
+          priorityFee: priorityFee.amount.toString(),
         });
 
         if (!walletStore.accountService) {
@@ -181,17 +220,22 @@ export const SendMessageForm: FC<SendMessageFormProps> = () => {
           message: messageToSend,
           password: walletStore.unlockedWallet.password,
           theirAlias: existingConversation.theirAlias,
+          priorityFee: priorityFee,
         });
       } else {
         // If no active conversation or no alias, use regular sending
-        console.log("No active conversation found, sending regular message");
-        txId = await walletStore.sendMessage(
-          messageToSend,
-          new Address(recipient),
-          walletStore.unlockedWallet.password
+        console.log(
+          "No active conversation found, sending regular message with priority fee:",
+          priorityFee.amount.toString()
         );
+        txId = await walletStore.sendMessage({
+          message: messageToSend,
+          toAddress: new Address(recipient),
+          password: walletStore.unlockedWallet.password,
+          priorityFee,
+        });
       }
-
+      setIsExpanded(false);
       console.log("Message sent! Transaction response:", txId);
 
       // Create the message object for storage
@@ -217,38 +261,40 @@ export const SendMessageForm: FC<SendMessageFormProps> = () => {
       // Only reset the message input, keep the recipient
       if (messageInputRef.current) messageInputRef.current.value = "";
       setMessage("");
+      if (messageInputRef.current) {
+        messageInputRef.current.style.height = "";
+      }
       setFeeEstimate(null);
 
       // Keep the conversation open with the same recipient
       messageStore.setOpenedRecipient(recipient);
-      messageStore.setIsCreatingNewChat(false);
     } catch (error) {
       console.error("Error sending message:", error);
-      alert(`Failed to send message: ${unknownErrorToErrorLike(error)}`);
+      toast.error(`Failed to send message: ${unknownErrorToErrorLike(error)}`);
     }
-  }, [messageStore, walletStore, message, recipient, feeEstimate]);
+  }, [
+    messageStore,
+    walletStore,
+    message,
+    openedRecipient,
+    feeEstimate,
+    priorityFee,
+  ]);
 
-  const onMessageInputKeyPressed = useCallback(
-    (e: KeyboardEvent) => {
-      if (e.key === "Enter") {
-        onSendClicked();
-      }
-    },
-    [onSendClicked]
-  );
+  const onSendClicked = useCallback(async () => {
+    // Check if we have an active conversation with this recipient
+    const activeConversations = messageStore.getActiveConversations();
+    const existingConversation = activeConversations.find(
+      (conv) => conv.kaspaAddress === openedRecipient
+    );
 
-  useEffect(() => {
-    const messageInput = messageInputRef.current;
-    if (messageInput) {
-      messageInput.addEventListener("keypress", onMessageInputKeyPressed);
+    if (existingConversation) {
+      return sendMessage();
     }
 
-    return () => {
-      if (messageInput) {
-        messageInput.removeEventListener("keypress", onMessageInputKeyPressed);
-      }
-    };
-  }, [messageInputRef, onMessageInputKeyPressed]);
+    // If no active conversation, display a warning modal
+    openModal("warn-costy-send-message");
+  }, [messageStore, openModal, openedRecipient, sendMessage]);
 
   const handleFileUpload = async (
     event: React.ChangeEvent<HTMLInputElement>
@@ -256,119 +302,118 @@ export const SendMessageForm: FC<SendMessageFormProps> = () => {
     const file = event.target.files?.[0];
     if (!file) return;
 
-    // Kaspa transaction payload size needs to be limited to ensure it fits in a transaction
-    // Base64 encoding increases size by ~33%, so we need to account for that
-    // Also need to leave room for other transaction data
-    const maxSize = 10 * 1024; // 10KB max for any file type to ensure it fits in transaction payload
-    if (file.size > maxSize) {
-      alert(
-        `File too large. Please keep files under ${
-          maxSize / 1024
-        }KB to ensure it fits in a Kaspa transaction.`
-      );
+    setIsUploading(true);
+    const { fileMessage, error } = await prepareFileForUpload(
+      file,
+      MAX_PAYLOAD_SIZE,
+      {},
+      (status) => toast.info(status)
+    );
+    setIsUploading(false);
+
+    if (error) {
+      toast.error(error);
+      if (fileInputRef.current) fileInputRef.current.value = "";
       return;
     }
-
-    setIsUploading(true);
-    try {
-      // Read file as base64
-      const reader = new FileReader();
-      const base64Content = await new Promise<string>((resolve, reject) => {
-        reader.onload = (e) => {
-          const result = e.target?.result;
-          if (typeof result === "string") {
-            resolve(result);
-          } else {
-            reject(new Error("Failed to read file as base64"));
-          }
-        };
-        reader.onerror = (e) => reject(e);
-        reader.readAsDataURL(file);
-      });
-
-      // Format the message with file metadata
-      const fileMessage = JSON.stringify({
-        type: "file",
-        name: file.name,
-        size: file.size,
-        mimeType: file.type,
-        content: base64Content,
-      });
-
-      // Verify the total message size will fit in a transaction
-      if (fileMessage.length > maxSize) {
-        throw new Error(
-          `Encoded file data too large for a Kaspa transaction. Please use a smaller file.`
-        );
-      }
-
-      // Set the message content
+    if (fileMessage) {
       setMessage(fileMessage);
       if (messageInputRef.current) {
         messageInputRef.current.value = `[File: ${file.name}]`;
       }
-    } catch (error) {
-      console.error("Error reading file:", error);
-      alert(
-        "Failed to read file: " +
-          (error instanceof Error ? error.message : "Unknown error")
-      );
-    } finally {
-      setIsUploading(false);
-      if (fileInputRef.current) {
-        fileInputRef.current.value = "";
-      }
     }
+    if (fileInputRef.current) fileInputRef.current.value = "";
   };
 
   return (
-    <div className="message-input-container">
-      <Input
-        ref={recipientInputRef}
-        type="text"
-        id="recipientAddress"
-        placeholder={
-          isCreatingNewChat ? "Enter recipient address" : "Conversation with:"
-        }
-        className="recipient-input"
-        value={recipient}
-        readOnly={!isCreatingNewChat}
-        style={{
-          cursor: !isCreatingNewChat ? "default" : "text",
-          fontFamily: !isCreatingNewChat
-            ? "Monaco, Menlo, Ubuntu Mono, monospace"
-            : "",
-          fontSize: !isCreatingNewChat ? "12px" : "",
-          color: !isCreatingNewChat ? "#666" : "",
-        }}
-        title={
-          !isCreatingNewChat ? `Conversation with: ${recipient}` : undefined
-        }
-        onChange={(e) => {
-          if (isCreatingNewChat) {
-            const value = e.target.value;
-            setRecipient(value);
-            setFeeEstimate(null);
-          }
-        }}
-      />
-      <div className="message-input-wrapper">
-        <Input
+    <div className="relative flex-col gap-8">
+      {/* Chevron expand/collapse that sorta sits above the textarea */}
+      <div className="absolute -top-4 left-1/2 z-10 hidden -translate-x-1/2 sm:block">
+        {!isExpanded ? (
+          <button
+            type="button"
+            className="flex cursor-pointer items-center justify-center rounded-full p-1 transition-colors duration-150 hover:bg-white/10"
+            onClick={() => {
+              setIsExpanded(true);
+              if (messageInputRef.current) {
+                messageInputRef.current.style.height = "144px";
+              }
+              if (onExpand) onExpand();
+            }}
+          >
+            <ChevronUpIcon className="h-5 w-5 text-gray-400" />
+          </button>
+        ) : (
+          <button
+            type="button"
+            className="flex cursor-pointer items-center justify-center rounded-full p-1 transition-colors duration-150 hover:bg-white/10"
+            onClick={() => {
+              setIsExpanded(false);
+              if (messageInputRef.current) {
+                messageInputRef.current.style.height = "auto";
+                const t = messageInputRef.current;
+                t.style.height = "auto";
+                t.style.height = `${Math.min(t.scrollHeight, 144)}px`;
+              }
+            }}
+          >
+            <ChevronDownIcon className="h-5 w-5 text-gray-400" />
+          </button>
+        )}
+      </div>
+      {openedRecipient && message && (
+        <div className="absolute -top-7.5 right-4 flex items-center gap-2">
+          <div
+            className={clsx(
+              "inline-block rounded-md border bg-white/10 px-3 py-1 text-right text-xs text-gray-400 transition-opacity duration-300 ease-out",
+              feeEstimate != null && getFeeClasses(feeEstimate)
+            )}
+          >
+            {isEstimating
+              ? feeEstimate != null
+                ? `Updating fee… ${formatKasAmount(feeEstimate)} KAS`
+                : `Estimating fee…`
+              : feeEstimate != null
+                ? `Estimated fee: ${formatKasAmount(feeEstimate)} KAS`
+                : `Calculating fee…`}
+          </div>
+
+          <PriorityFeeSelector
+            currentFee={priorityFee}
+            onFeeChange={setPriorityFee}
+            className="mr-0 sm:mr-2"
+          />
+        </div>
+      )}
+      <div className="flex items-center gap-2 rounded-lg border border-[var(--border-color)] bg-[var(--primary-bg)] p-1">
+        <Textarea
           ref={messageInputRef}
-          type="text"
-          id="messageInput"
+          rows={isExpanded ? 6 : 1}
           placeholder="Type your message..."
-          className="message-input"
+          className="peer flex-1 resize-none overflow-y-auto border-none bg-transparent p-2 text-[0.9em] text-[var(--text-primary)] outline-none"
           value={message}
-          onChange={(e) => {
-            const value = e.target.value;
-            setMessage(value);
-            setFeeEstimate(null);
+          onChange={(e) => setMessage(e.currentTarget.value)}
+          onInput={(e) => {
+            const t = e.currentTarget;
+            if (!isExpanded) {
+              t.style.height = "auto";
+              t.style.height = `${Math.min(t.scrollHeight, 144)}px`;
+            } else {
+              t.style.height = "144px";
+            }
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !e.shiftKey) {
+              e.preventDefault();
+              onSendClicked();
+            }
           }}
           autoComplete="off"
           spellCheck="false"
           data-form-type="other"
+          style={isExpanded ? { height: "144px" } : {}}
         />
+
         <input
           type="file"
           ref={fileInputRef}
@@ -376,23 +421,88 @@ export const SendMessageForm: FC<SendMessageFormProps> = () => {
           onChange={handleFileUpload}
           accept="image/*,.txt,.json,.md"
         />
+        <Popover className="relative">
+          {({ close }) => (
+            <>
+              <PopoverButton className="peer rounded p-2 hover:bg-white/5">
+                <PlusIcon className="size-5" />
+              </PopoverButton>
+              <Transition
+                enter="transition ease-out duration-100"
+                enterFrom="opacity-0 translate-y-1"
+                enterTo="opacity-100 translate-y-0"
+                leave="transition ease-in duration-75"
+                leaveFrom="opacity-100 translate-y-0"
+                leaveTo="opacity-0 translate-y-1"
+              >
+                <PopoverPanel className="absolute right-0 bottom-full mb-2 flex flex-col gap-2 rounded bg-[var(--secondary-bg)] p-2 shadow-lg">
+                  <button
+                    onClick={() => {
+                      openFileDialog();
+                      close();
+                    }}
+                    className="flex items-center gap-2 rounded p-2 hover:bg-white/5"
+                    disabled={isUploading}
+                  >
+                    <PaperClipIcon className="m-2 size-5" />
+                  </button>
+
+                  {openedRecipient && (
+                    <SendPayment
+                      address={openedRecipient}
+                      onPaymentSent={close}
+                    />
+                  )}
+                </PopoverPanel>
+              </Transition>
+            </>
+          )}
+        </Popover>
+
         <button
-          onClick={() => fileInputRef.current?.click()}
-          className="file-upload-button"
-          title="Upload file (images up to 100KB, other files up to 10KB)"
-          disabled={isUploading}
+          onClick={onSendClicked}
+          className={clsx(
+            "text-kas-primary hover:text-kas-secondary transition-width flex items-center justify-center overflow-hidden duration-200 ease-out",
+            message.length > 0 ? "mr-2 w-6 cursor-pointer" : "w-0"
+          )}
+          aria-label="Send"
         >
-          📎
-        </button>
-        <button onClick={onSendClicked} id="sendButton" className="send-button">
-          Send
+          <PaperAirplaneIcon className="h-6 w-6" />
         </button>
       </div>
-      {isEstimating && <div className="fee-estimate">Estimating fee...</div>}
-      {!isEstimating && feeEstimate !== null && (
-        <div className="fee-estimate">
-          Estimated fee: ${formatKasAmount(feeEstimate)} KAS
-        </div>
+
+      {isOpen("warn-costy-send-message") && (
+        <Modal onClose={() => closeModal("warn-costy-send-message")}>
+          <div className="flex flex-col items-center justify-center gap-8">
+            <h2 className="text-lg text-yellow-400">
+              <ExclamationTriangleIcon className="mr-2 inline size-6 text-yellow-400" />
+              Your Correspondent hasn't answered yet
+            </h2>
+
+            <p className="text-center">
+              Sending this message will carry an{" "}
+              <span className="font-bold">extra cost of 0.2 KAS</span>, that
+              will be sent to your correspondent. Are you sure you want to send
+              it?
+            </p>
+            <div className="flex items-start justify-start rounded-lg border border-[#B6B6B6]/20 bg-gradient-to-br from-[#B6B6B6]/10 to-[#B6B6B6]/5 px-4 py-2">
+              <InformationCircleIcon className="mr-2 size-10 text-white" />
+              <p className="">
+                This is occuring because your correspondent hasn't accepted the
+                handshake yet.
+              </p>
+            </div>
+
+            <Button
+              onClick={() => {
+                closeModal("warn-costy-send-message");
+                sendMessage();
+              }}
+            >
+              Send anyway
+            </Button>
+          </div>
+        </Modal>
       )}
     </div>
   );

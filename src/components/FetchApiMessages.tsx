@@ -2,18 +2,15 @@ import { FC, useState, useEffect } from "react";
 import { useWalletStore } from "../store/wallet.store";
 import { useMessagingStore } from "../store/messaging.store";
 import { WalletStorage } from "../utils/wallet-storage";
-import { decrypt_message, EncryptedMessage } from "cipher";
 import { Transaction } from "../types/all";
 import { getApiEndpoint } from "../config/nodes";
 import "./FetchApiMessages.css";
 import { CipherHelper } from "../utils/cipher-helper";
+import { DecryptionCache } from "../utils/decryption-cache";
 import { Message } from "../types/all";
-import {
-  decryptXChaCha20Poly1305,
-  XPrv,
-  PrivateKeyGenerator,
-} from "kaspa-wasm";
 import { unknownErrorToErrorLike } from "../utils/errors";
+import { ArrowPathIcon } from "@heroicons/react/24/solid";
+import clsx from "clsx";
 
 type FetchApiMessagesProps = {
   address: string;
@@ -23,35 +20,45 @@ export const FetchApiMessages: FC<FetchApiMessagesProps> = ({ address }) => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const walletStore = useWalletStore();
+  const unlockedWallet = useWalletStore((s) => s.unlockedWallet);
   const messagingStore = useMessagingStore();
 
   useEffect(() => {
-    if (address && walletStore.unlockedWallet) {
+    if (address && unlockedWallet) {
       fetchAndProcessMessages();
     }
-  }, [address, walletStore.unlockedWallet]);
+  }, [address, unlockedWallet]);
 
   // Add event listener for triggering API fetch from localStorage
   useEffect(() => {
     const handleTriggerApiFetch = (event: CustomEvent) => {
       const { address: eventAddress } = event.detail;
-      console.log('Received kasia-trigger-api-fetch event for address:', eventAddress);
-      
+      console.log(
+        "Received kasia-trigger-api-fetch event for address:",
+        eventAddress
+      );
+
       // Only trigger if this component matches the address
       if (eventAddress === address && walletStore.unlockedWallet) {
-        console.log('Triggering API fetch due to localStorage flag');
+        console.log("Triggering API fetch due to localStorage flag");
         fetchAndProcessMessages();
       }
     };
 
     // Listen for the custom event
-    window.addEventListener('kasia-trigger-api-fetch', handleTriggerApiFetch as EventListener);
+    window.addEventListener(
+      "kasia-trigger-api-fetch",
+      handleTriggerApiFetch as EventListener
+    );
 
     // Cleanup
     return () => {
-      window.removeEventListener('kasia-trigger-api-fetch', handleTriggerApiFetch as EventListener);
+      window.removeEventListener(
+        "kasia-trigger-api-fetch",
+        handleTriggerApiFetch as EventListener
+      );
     };
-  }, [address, walletStore.unlockedWallet]);
+  }, [address, unlockedWallet]);
 
   const fetchAndProcessMessages = async () => {
     setLoading(true);
@@ -143,6 +150,14 @@ export const FetchApiMessages: FC<FetchApiMessagesProps> = ({ address }) => {
               continue;
             }
 
+            // 🚀 OPTIMIZATION: Skip if we know this transaction failed decryption before
+            if (DecryptionCache.hasFailed(currentAddress, tx.transaction_id)) {
+              console.log(
+                `API Messages: Skipping known failed decryption: ${tx.transaction_id}`
+              );
+              continue;
+            }
+
             console.log(
               `API Messages: Processing new transaction: ${tx.transaction_id}`,
               { tx }
@@ -191,6 +206,7 @@ export const FetchApiMessages: FC<FetchApiMessagesProps> = ({ address }) => {
 
                 const handshakePrefix = "313a68616e647368616b653a"; // "1:handshake:"
                 const commPrefix = "313a636f6d6d3a"; // "1:comm:"
+                const paymentPrefix = "313a7061796d656e743a"; // "1:payment:"
 
                 let messageType = "unknown";
                 let isHandshake = false;
@@ -217,6 +233,23 @@ export const FetchApiMessages: FC<FetchApiMessagesProps> = ({ address }) => {
                     messageType = "comm";
                     targetAlias = parts[2];
                     encryptedContent = parts[3];
+                  }
+                } else if (messageHex.startsWith(paymentPrefix)) {
+                  // Parse payment messages - simplified format without aliases
+                  const hexToString = (hex: string) => {
+                    const hexArray = hex.match(/.{1,2}/g) || [];
+                    return hexArray
+                      .map((byte) => String.fromCharCode(parseInt(byte, 16)))
+                      .join("");
+                  };
+
+                  const messageStr = hexToString(messageHex);
+                  const parts = messageStr.split(":");
+
+                  if (parts.length >= 3) {
+                    messageType = "payment";
+                    // No alias needed - parts[2] is the encrypted content
+                    encryptedContent = parts[2];
                   }
                 }
 
@@ -472,103 +505,11 @@ export const FetchApiMessages: FC<FetchApiMessagesProps> = ({ address }) => {
                   console.log(
                     `API Messages: Trying legacy derivation keys as fallback...`
                   );
-
-                  // Create a temporary legacy key generator
-                  const seed = decryptXChaCha20Poly1305(
-                    walletStore.unlockedWallet.encryptedXPrv,
-                    walletStore.unlockedWallet.password
-                  );
-                  const xprv = new XPrv(seed);
-                  const legacyKeyGenerator = new PrivateKeyGenerator(
-                    xprv,
-                    false,
-                    BigInt(1)
-                  ); // Legacy uses account index 1
-
-                  // Try legacy receive keys
-                  for (let i = 0; i < maxKeys && !decryptionSuccess; i++) {
-                    try {
-                      console.log(
-                        `API Messages: Trying legacy receive key at index ${i}`
-                      );
-                      const privateKey = legacyKeyGenerator.receiveKey(i);
-                      const privateKeyHex = privateKey.toString();
-
-                      const messageId = `${tx.transaction_id}_legacy_receive_${i}`;
-                      const result = await CipherHelper.tryDecrypt(
-                        encryptedContent,
-                        privateKeyHex,
-                        messageId
-                      );
-
-                      if (result) {
-                        decryptedContent = result;
-                        decryptionSuccess = true;
-                        successfulKeyType = "legacy_receive";
-                        successfulKeyIndex = i;
-                        console.log(
-                          `API Messages: Successfully decrypted with legacy receive key at index ${i}`
-                        );
-
-                        // Extract sender from handshake payload if needed
-                        if (
-                          senderAddress === "Unknown" &&
-                          result.includes("handshake")
-                        ) {
-                          try {
-                            const handshakeMatch = result.match(
-                              /ciph_msg:1:handshake:(.+)/
-                            );
-                            if (handshakeMatch) {
-                              const handshakeData = JSON.parse(
-                                handshakeMatch[1]
-                              );
-                              if (
-                                handshakeData.isResponse &&
-                                handshakeData.recipientAddress
-                              ) {
-                                console.log(
-                                  `API Messages: Extracted sender from legacy handshake response: ${handshakeData.recipientAddress}`
-                                );
-                                senderAddress = handshakeData.recipientAddress;
-                              }
-                            }
-                          } catch (e) {
-                            console.log(
-                              `API Messages: Could not extract sender from legacy handshake payload: ${e}`
-                            );
-                          }
-                        }
-
-                        // Create and store the decrypted message
-                        const message: Message = {
-                          senderAddress: senderAddress,
-                          recipientAddress: recipientAddress,
-                          timestamp: tx.block_time || Date.now(),
-                          content: result,
-                          payload: tx.payload,
-                          amount: tx.outputs[0].amount || 0,
-                          fee: 0,
-                          transactionId: tx.transaction_id,
-                        };
-
-                        messagingStore.storeMessage(
-                          message,
-                          walletStore.address?.toString() || ""
-                        );
-                        break;
-                      }
-                    } catch (error) {
-                      console.log(
-                        `API Messages: Failed to decrypt with legacy receive key at index ${i}: ${
-                          unknownErrorToErrorLike(error).message
-                        }`
-                      );
-                    }
-                  }
                 }
 
+                // 🚀 OPTIMIZATION: Mark decryption result in cache
                 if (!decryptionSuccess) {
+                  DecryptionCache.markFailed(currentAddress, tx.transaction_id);
                   console.log(
                     `API Messages: Could not decrypt message for transaction ${
                       tx.transaction_id
@@ -576,12 +517,16 @@ export const FetchApiMessages: FC<FetchApiMessagesProps> = ({ address }) => {
                       walletStore.unlockedWallet.derivationType === "standard"
                         ? " and legacy keys"
                         : ""
-                    }`
+                    } - marked as failed in cache`
                   );
                   decryptedContent = "[Could not decrypt message]";
                 } else {
+                  DecryptionCache.markSuccess(
+                    currentAddress,
+                    tx.transaction_id
+                  );
                   console.log(
-                    `API Messages: Successfully decrypted message using ${successfulKeyType} key at index ${successfulKeyIndex}`
+                    `API Messages: Successfully decrypted message using ${successfulKeyType} key at index ${successfulKeyIndex} - removed from failed cache if present`
                   );
                   console.log(
                     `API Messages: Decrypted content: ${decryptedContent}`
@@ -643,15 +588,23 @@ export const FetchApiMessages: FC<FetchApiMessagesProps> = ({ address }) => {
   };
 
   return (
-    <div className="api-messages-button">
+    <div>
       <button
         onClick={fetchAndProcessMessages}
         disabled={loading}
+        className={clsx(
+          "flex w-full cursor-pointer items-center justify-center gap-2 rounded-md px-4 py-2",
+          { "cursor-not-allowed": loading }
+        )}
         title={
-          error ? `Error: ${error}` : "Fetch latest messages from blockchain"
+          error ? `Error: ${error}` : "Fetch latest messages from blockDAG"
         }
       >
-        {loading ? "Loading..." : "Refresh Messages"}
+        {loading ? (
+          <ArrowPathIcon className="h-6 w-6 animate-spin text-gray-500" />
+        ) : (
+          <ArrowPathIcon className="h-6 w-6 text-[#49EACB] hover:scale-110" />
+        )}
       </button>
       {error && <div className="api-error-tooltip">{error}</div>}
     </div>

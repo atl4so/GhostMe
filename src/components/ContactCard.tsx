@@ -2,6 +2,7 @@ import { FC, useMemo, useState } from "react";
 import { Contact } from "../types/all";
 import { decodePayload } from "../utils/all-in-one";
 import { useMessagingStore } from "../store/messaging.store";
+import { AvatarHash } from "./icons/AvatarHash";
 import {
   PencilIcon,
   CheckCircleIcon,
@@ -13,7 +14,8 @@ export const ContactCard: FC<{
   contact: Contact;
   onClick?: (contact: Contact) => void;
   isSelected?: boolean;
-}> = ({ contact, onClick, isSelected }) => {
+  collapsed?: boolean; // tiny-avatar mode
+}> = ({ contact, onClick, isSelected, collapsed = false }) => {
   const [isEditingNickname, setIsEditingNickname] = useState(false);
   const [tempNickname, setTempNickname] = useState(contact.nickname || "");
   const messagingStore = useMessagingStore();
@@ -34,17 +36,33 @@ export const ContactCard: FC<{
 
       // If it's a file message
       if (message.content.startsWith("[File:")) {
+        // only consider the file name, not the whole content
         return message.content;
       }
 
       // For regular messages, try to decode if it's encrypted
       if (message.content.startsWith("ciph_msg:")) {
         const decoded = decodePayload(message.content);
-        return decoded || "Encrypted message";
+        return decoded
+          ? decoded.slice(0, 40) + (message.content.length > 40 ? "..." : "")
+          : "Encrypted message";
       }
 
-      // Plain text content
-      return message.content;
+      // Check if it's a payment message
+      try {
+        const parsed = JSON.parse(message.content);
+        if (parsed.type === "payment") {
+          return parsed.message?.trim() || "Payment";
+        }
+      } catch (e) {
+        // Not a payment message, continue with normal handling
+      }
+
+      // Plain text content, take the 20 first characters
+      return (
+        message.content.slice(0, 40) +
+        (message.content.length > 40 ? "..." : "")
+      );
     }
 
     // Fallback to payload if no content
@@ -122,20 +140,64 @@ export const ContactCard: FC<{
     return null;
   }
 
+  // Collapsed w/ Avatar
+  if (collapsed) {
+    const avatarLetter = contact.nickname?.trim()?.[0]?.toUpperCase();
+
+    return (
+      <div
+        className="relative flex cursor-pointer justify-center py-2"
+        title={displayName}
+        onClick={() => onClick?.(contact)}
+      >
+        <div className="relative h-8 w-8">
+          {/* hash */}
+          <AvatarHash
+            address={contact.address}
+            size={32}
+            selected={isSelected}
+            className={clsx({ "opacity-60": !!avatarLetter })}
+          />
+
+          {/* letter */}
+          {avatarLetter && (
+            <span
+              className={clsx(
+                "absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-[calc(50%+1px)]",
+                "pointer-events-none select-none",
+                "flex h-8 w-8 items-center justify-center",
+                "rounded-full text-base leading-none font-bold tracking-wide text-gray-200"
+              )}
+            >
+              {avatarLetter}
+            </span>
+          )}
+
+          {/* ring hugging the avatar, only when selected */}
+          {isSelected && (
+            <div className="ring-kas-secondary pointer-events-none absolute inset-0 animate-pulse rounded-full ring-2 blur-sm filter" />
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // Expanded (full view)
   return (
     <div
       className={clsx(
-        "p-3 rounded-lg cursor-pointer transition-all duration-200 mb-2 bg-[var(--secondary-bg)] border",
+        "group hover:border-kas-secondary/50 bg-bg-secondary mb-2 cursor-pointer rounded-lg border p-4 transition-all duration-200 hover:bg-slate-900/20",
         {
-          "border-[var(--accent-blue)]": isSelected,
-          "border-transparent": !isSelected,
+          "border-[var(--color-kas-primary)] bg-[var(--color-kas-primary)]/5":
+            isSelected,
+          "border-[var(--border-color)]": !isSelected,
         }
       )}
       onClick={() => !isEditingNickname && onClick?.(contact)}
     >
-      <div className="font-semibold text-base mb-2">
+      <div className="mb-2 text-base font-semibold">
         {isEditingNickname ? (
-          <div className="flex items-center gap-2 w-full">
+          <div className="flex w-full flex-col md:flex-row md:items-center md:gap-2">
             <input
               type="text"
               value={tempNickname}
@@ -145,28 +207,34 @@ export const ContactCard: FC<{
                 if (e.key === "Escape") handleNicknameCancel();
               }}
               autoFocus
-              placeholder="Enter nickname..."
-              className="flex-1 rounded-sm text-xs h-5 leading-none"
+              placeholder={contact?.address}
+              className="h-5 flex-1 rounded-sm text-xs leading-none"
             />
-            <button
-              onClick={handleNicknameSave}
-              className="p-0.5 rounded-sm cursor-pointer hover:bg-gray-100"
-            >
-              <CheckCircleIcon className="h-5 w-5 text-green-500 fill-current" />
-            </button>
-            <button
-              onClick={handleNicknameCancel}
-              className="p-0.5 rounded-sm cursor-pointer hover:bg-gray-100"
-            >
-              <XCircleIcon className="h-5 w-5 text-red-500 fill-current" />
-            </button>
+            <div className="mt-2 flex w-full justify-between gap-2 md:mt-0 md:w-auto md:justify-start">
+              <button
+                onClick={handleNicknameSave}
+                className="flex w-full cursor-pointer items-center justify-center rounded-sm bg-green-500 p-0.5 hover:bg-gray-600 md:w-fit"
+              >
+                <CheckCircleIcon className="h-5 w-5 fill-current text-gray-300" />
+              </button>
+              <button
+                onClick={handleNicknameCancel}
+                className="flex w-full cursor-pointer items-center justify-center rounded-sm bg-red-500 p-0.5 text-white hover:bg-gray-600 md:w-fit"
+              >
+                <XCircleIcon className="h-5 w-5 fill-current text-gray-300" />
+              </button>
+            </div>
           </div>
         ) : (
-          <div className="flex items-center gap-1 w-full">
+          <div className="flex w-full items-center justify-between gap-1">
             <span
-              className={`flex-1 ${
-                contact.nickname?.trim() ? "cursor-help" : "cursor-default"
-              }`}
+              className={clsx(
+                "max-w-full cursor-pointer truncate break-all text-[var(--text-primary)] group-data-checked:text-[var(--color-kas-secondary)]",
+                {
+                  "cursor-help": contact.nickname?.trim(),
+                  "cursor-default": !contact.nickname?.trim(),
+                }
+              )}
               title={
                 contact.nickname?.trim()
                   ? `Address: ${shortAddress}`
@@ -181,15 +249,19 @@ export const ContactCard: FC<{
                 setIsEditingNickname(true);
               }}
               title="Edit nickname"
-              className="bg-transparent border-0 cursor-pointer opacity-60 hover:opacity-100 text-xs"
+              className="cursor-pointer border-0 bg-transparent text-xs opacity-60 hover:opacity-100"
             >
-              <PencilIcon className="h-4 w-4" />
+              <PencilIcon className="h-5 w-5 md:h-4 md:w-4" />
             </button>
           </div>
         )}
       </div>
-      <div className="contact-preview">{preview}</div>
-      <div className="contact-time">{timestamp}</div>
+      <div className="overflow-hidden text-sm text-ellipsis whitespace-nowrap text-[var(--text-secondary)]">
+        {preview}
+      </div>
+      <div className="mt-1 text-xs text-[var(--text-secondary)]">
+        {timestamp}
+      </div>
     </div>
   );
 };

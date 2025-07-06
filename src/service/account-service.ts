@@ -1,27 +1,43 @@
+import { EventEmitter } from "eventemitter3";
 import {
   Address,
-  Generator,
-  kaspaToSompi,
-  PaymentOutput,
-  PendingTransaction,
-  UtxoContext,
   UtxoProcessor,
+  UtxoContext,
+  Generator,
+  PaymentOutput,
   UtxoEntry,
-  IUtxosChanged,
   ITransaction,
-  sompiToKaspaString,
-  FeeSource,
+  PendingTransaction,
   GeneratorSummary,
+  FeeSource,
+  sompiToKaspaString,
+  kaspaToSompi,
+  ITransactionOutput,
 } from "kaspa-wasm";
 import { KaspaClient } from "../utils/all-in-one";
-import { WalletStorage } from "../utils/wallet-storage";
-import EventEmitter from "eventemitter3";
 import { encrypt_message } from "cipher";
+import { DecryptionCache } from "../utils/decryption-cache";
 import { CipherHelper } from "../utils/cipher-helper";
+import {
+  BlockAddedData,
+  Output,
+  PriorityFeeConfig,
+  Transaction,
+} from "../types/all";
+import { UnlockedWallet } from "../types/wallet.type";
+import {
+  ExplorerOutput,
+  ExplorerTransaction,
+  TransactionId,
+  getTransactionId,
+  getTransactionPayload,
+  getBlockTime,
+  isExplorerTransaction,
+  isITransaction,
+} from "../types/transactions";
 import { useMessagingStore } from "../store/messaging.store";
 import { useWalletStore } from "../store/wallet.store";
-import { UnlockedWallet } from "src/types/wallet.type";
-import { TransactionId } from "src/types/transactions";
+import { WalletStorage } from "../utils/wallet-storage";
 
 // Message related types
 type DecodedMessage = {
@@ -54,7 +70,7 @@ type AccountServiceEvents = {
     pendingUtxoCount: number;
   }) => void;
   utxosChanged: (utxos: UtxoEntry[]) => void;
-  transactionReceived: (transaction: any) => void;
+  transactionReceived: (transaction: unknown) => void;
   messageReceived: (message: DecodedMessage) => void;
 };
 
@@ -63,11 +79,13 @@ type SendMessageArgs = {
   message: string;
   password: string;
   amount?: bigint; // Optional custom amount, defaults to 0.2 KAS
+  priorityFee?: PriorityFeeConfig; // Add priority fee support
 };
 
 type EstimateSendMessageFeesArgs = {
   toAddress: Address;
   message: string;
+  priorityFee?: PriorityFeeConfig; // Add priority fee support
 };
 
 type SendMessageWithContextArgs = {
@@ -75,6 +93,7 @@ type SendMessageWithContextArgs = {
   message: string;
   password: string;
   theirAlias: string;
+  priorityFee?: PriorityFeeConfig; // Add priority fee support
 };
 
 type CreateTransactionArgs = {
@@ -83,19 +102,22 @@ type CreateTransactionArgs = {
   payload: string;
   payloadSize?: number;
   messageLength?: number;
+  priorityFee?: PriorityFeeConfig; // Add priority fee support
 };
 
 type CreateWithdrawTransactionArgs = {
   address: Address;
   amount: bigint;
+  priorityFee?: PriorityFeeConfig; // Add priority fee support
 };
 
-// Add this helper function at the top level
-function stringifyWithBigInt(obj: any): string {
-  return JSON.stringify(obj, (_, value) =>
-    typeof value === "bigint" ? value.toString() : value
-  );
-}
+type CreatePaymentWithMessageArgs = {
+  address: Address;
+  amount: bigint;
+  payload: string;
+  originalMessage?: string; // Add the original message for outgoing record creation
+  priorityFee?: PriorityFeeConfig; // Add priority fee support
+};
 
 interface Conversation {
   conversationId: string;
@@ -200,8 +222,7 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
     });
   }
 
-  private async _fetchTransactionDetails(txId: string) {
-    const maxRetries = 10; // Increased to 10 attempts
+  private async _fetchTransactionDetails(txId: string, maxRetries = 10) {
     const retryDelay = 2000; // Changed to 2 seconds between retries
 
     for (let attempt = 0; attempt < maxRetries; attempt++) {
@@ -280,7 +301,7 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
       }
 
       const data = await response.json();
-      const transactions = data.transactions || [];
+      const transactions: ExplorerTransaction[] = data || [];
 
       console.log(`Found ${transactions.length} historical transactions`);
 
@@ -289,12 +310,16 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
 
       // Process each transaction
       for (const tx of transactions) {
-        const txId = tx.transactionId;
+        const txId = tx.transaction_id;
         if (!txId || this.processedMessageIds.has(txId)) continue;
 
         // Check if this is a message transaction and involves our address
-        if (this.isMessageTransaction(tx) && this.isTransactionForUs(tx)) {
-          await this.processMessageTransaction(tx, txId, Number(tx.blockTime));
+        if (
+          this.isMessageOrHandshakeTransaction(tx) &&
+          this.isTransactionForUs(tx)
+        ) {
+          console.log(`Processing historical message transaction: ${txId}`);
+          await this.processMessageTransaction(tx, txId, Number(tx.block_time));
         }
       }
 
@@ -343,9 +368,10 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
 
       // Set up block subscription with optimized message handling
       console.log("Setting up block subscription...");
-      await this.rpcClient.subscribeToBlockAdded(
-        this.processBlockEvent.bind(this)
-      );
+      await this.rpcClient.subscribeToBlockAdded((event) => {
+        // Fire-and-forget; callback signature remains (event) => void
+        void this.processBlockEvent(event as unknown as BlockAddedData);
+      });
       console.log("Successfully subscribed to block events");
 
       // Fetch historical messages after setup is complete
@@ -481,6 +507,181 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
     }
   }
 
+  public async createPaymentWithMessage(
+    paymentTransaction: CreatePaymentWithMessageArgs,
+    password: string
+  ): Promise<TransactionId> {
+    if (!this.isStarted || !this.rpcClient.rpc) {
+      throw new Error("Account service is not started");
+    }
+
+    if (!this.receiveAddress) {
+      throw new Error("Receive address not initialized");
+    }
+
+    if (!paymentTransaction.address) {
+      throw new Error("Transaction address is required");
+    }
+
+    if (!paymentTransaction.amount) {
+      throw new Error("Transaction amount is required");
+    }
+
+    console.log("=== CREATING PAYMENT WITH MESSAGE ===");
+    const primaryAddress = this.receiveAddress;
+    console.log(
+      "Creating payment from primary address:",
+      primaryAddress.toString()
+    );
+    console.log(
+      "Change will go back to primary address:",
+      primaryAddress.toString()
+    );
+    console.log(`Destination: ${paymentTransaction.address.toString()}`);
+    console.log(
+      `Amount: ${Number(paymentTransaction.amount) / 100000000} KAS (${
+        paymentTransaction.amount
+      } sompi)`
+    );
+    console.log(
+      `Payload length: ${paymentTransaction.payload.length / 2} bytes`
+    );
+
+    const privateKeyGenerator = WalletStorage.getPrivateKeyGenerator(
+      this.unlockedWallet,
+      password
+    );
+
+    if (!privateKeyGenerator) {
+      throw new Error("Failed to generate private key");
+    }
+
+    if (!this.context) {
+      throw new Error("UTXO context not initialized");
+    }
+
+    try {
+      // Use a modified generator that sends to recipient but includes payload
+      const generator =
+        await this._getGeneratorForPaymentWithMessage(paymentTransaction);
+
+      console.log("Generating payment transaction...");
+      const pendingTransaction: PendingTransaction | null =
+        await generator.next();
+
+      if (!pendingTransaction) {
+        throw new Error("Failed to generate transaction");
+      }
+
+      if ((await generator.next()) !== null) {
+        throw new Error("Unexpected multiple transaction generation");
+      }
+
+      // Log the addresses that need signing
+      const addressesToSign = pendingTransaction.addresses();
+      console.log(
+        `Transaction requires signing ${addressesToSign.length} addresses:`
+      );
+      addressesToSign.forEach((addr, i) => {
+        console.log(`  Address ${i + 1}: ${addr.toString()}`);
+      });
+
+      // Always use receive key for all addresses since we only use primary address
+      const privateKeys = pendingTransaction.addresses().map(() => {
+        console.log("Using primary address key for signing");
+        const key = privateKeyGenerator.receiveKey(0);
+        if (!key) {
+          throw new Error("Failed to generate private key for signing");
+        }
+        return key;
+      });
+
+      // Sign the transaction
+      console.log("Signing transaction...");
+      pendingTransaction.sign(privateKeys);
+
+      // Submit the transaction
+      console.log("Submitting transaction to network...");
+
+      const txId: string = await pendingTransaction.submit(this.rpcClient.rpc);
+
+      console.log(`Payment with message submitted with ID: ${txId}`);
+
+      // Reset the context to trigger immediate balance update
+      await this.context.clear();
+      await this.context.trackAddresses([this.receiveAddress!]);
+
+      // Create a message record for the sender to show they sent this payment
+      if (this.receiveAddress) {
+        try {
+          // Parse the payload to extract the payment details
+          const hexToString = (hex: string) => {
+            let str = "";
+            for (let i = 0; i < hex.length; i += 2) {
+              str += String.fromCharCode(parseInt(hex.substr(i, 2), 16));
+            }
+            return str;
+          };
+
+          // Remove the ciph_msg: prefix and parse the message
+          const prefixLength = "636970685f6d73673a".length; // "ciph_msg:" in hex
+          const messageHex = paymentTransaction.payload.substring(prefixLength);
+          const messageStr = hexToString(messageHex);
+          const parts = messageStr.split(":");
+
+          if (parts.length >= 3 && parts[1] === "payment") {
+            // For outgoing messages, we don't decrypt - we already know the content!
+            // New simplified format: parts[0] = "1", parts[1] = "payment", parts[2] = encrypted_payload
+
+            // We need to recreate the payment payload that was originally encrypted
+            // This should match the structure that was passed to createPaymentWithMessage
+            const paymentAmount = Number(paymentTransaction.amount) / 100000000;
+
+            // Create payment content using the original message if available
+            const paymentContent = JSON.stringify({
+              type: "payment",
+              message: paymentTransaction.originalMessage || "Payment sent",
+              amount: paymentAmount,
+              timestamp: Math.floor(Date.now() / 1000),
+              version: 1,
+            });
+
+            // Create outgoing message record - no decryption needed!
+            const outgoingMessage: DecodedMessage = {
+              transactionId: txId,
+              senderAddress: this.receiveAddress.toString(),
+              recipientAddress: paymentTransaction.address.toString(),
+              timestamp: Math.floor(Date.now() / 1000),
+              content: paymentContent,
+              amount: paymentAmount,
+              payload: paymentTransaction.payload,
+            };
+            const messagingStore = useMessagingStore.getState();
+            if (messagingStore) {
+              const myAddress = this.receiveAddress.toString();
+              messagingStore.storeMessage(outgoingMessage, myAddress);
+              messagingStore.loadMessages(myAddress);
+            }
+
+            console.log("Created outgoing payment message record for sender");
+          }
+        } catch (error) {
+          console.warn(
+            "Could not create outgoing payment message record:",
+            error
+          );
+        }
+      }
+
+      console.log("========================");
+
+      return txId;
+    } catch (error) {
+      console.error("Error creating payment with message:", error);
+      throw error;
+    }
+  }
+
   public async createWithdrawTransaction(
     withdrawTransaction: CreateWithdrawTransactionArgs,
     password: string
@@ -541,10 +742,6 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
 
       if (!pendingTransaction) {
         throw new Error("Failed to generate transaction");
-      }
-
-      if ((await generator.next()) !== null) {
-        throw new Error("Unexpected multiple transaction generation");
       }
 
       // Log the addresses that need signing
@@ -703,6 +900,7 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
           address: destinationAddress,
           amount: messageAmount,
           payload: payload,
+          priorityFee: sendMessage.priorityFee,
         },
         sendMessage.password
       );
@@ -757,6 +955,7 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
         address: destinationAddress,
         amount: BigInt(0.2 * 100_000_000),
         payload: payloadHex,
+        priorityFee: sendMessage.priorityFee,
       });
 
       return summary;
@@ -838,6 +1037,7 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
         address: destinationAddress,
         amount: minimumAmount,
         payload: payload,
+        priorityFee: { amount: BigInt(0), source: FeeSource.SenderPays },
       },
       password
     );
@@ -934,13 +1134,101 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
       ? []
       : [new PaymentOutput(destinationAddress, transaction.amount)];
 
+    // Calculate additional fee based on fee rate difference
+    let additionalFee = BigInt(0);
+
+    if (
+      transaction.priorityFee?.feerate &&
+      transaction.priorityFee.feerate > 1
+    ) {
+      // Estimate transaction mass (typical message transaction ~2500-3000 grams)
+      const estimatedMass = 2800; // grams - rough estimate for message transaction
+      const baseFeeRate = 1; // sompi per gram
+      const additionalFeeRate = transaction.priorityFee.feerate - baseFeeRate;
+      additionalFee = BigInt(Math.floor(additionalFeeRate * estimatedMass));
+
+      console.log("Calculated additional priority fee:", {
+        selectedFeeRate: transaction.priorityFee.feerate,
+        baseFeeRate,
+        additionalFeeRate,
+        estimatedMass,
+        additionalFeeSompi: additionalFee.toString(),
+        additionalFeeKAS: Number(additionalFee) / 100_000_000,
+      });
+    } else if (
+      transaction.priorityFee?.amount &&
+      transaction.priorityFee.amount > 0
+    ) {
+      additionalFee = transaction.priorityFee.amount;
+      console.log(
+        "Using explicit priority fee amount:",
+        additionalFee.toString()
+      );
+    }
+
+    console.log("Final priority fee for Generator:", additionalFee.toString());
+
     return new Generator({
-      changeAddress: primaryAddress, // Always use primary address for change
+      changeAddress: primaryAddress,
       entries: this.context,
       outputs: outputs,
       payload: transaction.payload,
       networkId: this.networkId,
-      priorityFee: BigInt(0),
+      priorityFee: additionalFee,
+    });
+  }
+
+  private async _getGeneratorForPaymentWithMessage(
+    transaction: CreatePaymentWithMessageArgs
+  ) {
+    if (!this.isStarted) {
+      throw new Error("Account service is not started");
+    }
+
+    console.log("Using destination address:", transaction.address.toString());
+
+    const generateSummary = await this.estimateTransaction({
+      address: transaction.address,
+      amount: transaction.amount,
+      payload: transaction.payload,
+      priorityFee: transaction.priorityFee,
+    });
+
+    const estimatedFees = generateSummary.fees;
+
+    const matureBalance = this.context.balance?.mature ?? 0n;
+
+    const isFullBalance = transaction.amount + estimatedFees >= matureBalance;
+
+    console.log("is full balance?:", {
+      requestedAmount: transaction.amount.toString(),
+      matureBalance: this.context.balance?.mature.toString(),
+      isFullBalance,
+    });
+
+    // if thats the case, use destination as change address and ReceiverPays fees
+    const changeAddress = isFullBalance
+      ? new Address(transaction.address.toString())
+      : this.receiveAddress!;
+
+    // use ReceiverPays for full balance to avoid insufficient funds
+    const priorityFee = isFullBalance
+      ? {
+          amount: BigInt(0),
+          source: FeeSource.ReceiverPays,
+        }
+      : transaction.priorityFee || {
+          amount: BigInt(0),
+          source: FeeSource.SenderPays,
+        };
+
+    return new Generator({
+      changeAddress,
+      entries: this.context,
+      outputs: [new PaymentOutput(transaction.address, transaction.amount)],
+      networkId: this.networkId,
+      priorityFee,
+      payload: transaction.payload,
     });
   }
 
@@ -965,56 +1253,134 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
       // priorityEntries: this.context.getMatureRange(0, this.context.matureLength),
       outputs: [new PaymentOutput(transaction.address, transaction.amount)],
       networkId: this.networkId,
-      priorityFee: {
+      priorityFee: transaction.priorityFee || {
         amount: BigInt(0),
         source: FeeSource.ReceiverPays,
       },
     });
   }
 
-  private isMessageTransaction(tx: ITransaction): boolean {
+  private isMessageOrHandshakeTransaction(
+    tx: ITransaction | ExplorerTransaction
+  ): boolean {
     return tx?.payload?.startsWith(this.MESSAGE_PREFIX_HEX) ?? false;
   }
 
   private async processMessageTransaction(
-    tx: any,
+    tx: ITransaction | ExplorerTransaction,
     blockHash: string,
-    blockTime: number
+    blockTime: number,
+    maxRetries = 10
   ) {
     try {
+      const walletAddress =
+        this.unlockedWallet.publicKeyGenerator.receiveAddress(
+          this.networkId,
+          0
+        );
+      const stringWalletAddress = walletAddress.toString();
+
+      const txId = getTransactionId(tx);
+      if (!txId) {
+        console.warn("Transaction ID is missing in real-time processing");
+        return;
+      }
+
+      // 🚀 OPTIMIZATION: Skip if we know this transaction failed decryption before
+      if (DecryptionCache.hasFailed(stringWalletAddress, txId)) {
+        if (process.env.NODE_ENV === "development") {
+          console.debug(`Real-time: Skipping known failed decryption: ${txId}`);
+        }
+        return;
+      }
+
       // Get sender address from transaction inputs
       let senderAddress = null;
-      if (tx.inputs && tx.inputs.length > 0) {
+      if (isITransaction(tx) && tx.inputs && tx.inputs.length > 0) {
         const input = tx.inputs[0];
         const prevTxId = input.previousOutpoint?.transactionId;
         const prevOutputIndex = input.previousOutpoint?.index;
 
         if (prevTxId && typeof prevOutputIndex === "number") {
           try {
-            const prevTx = await this._fetchTransactionDetails(prevTxId);
+            const prevTx = await this._fetchTransactionDetails(
+              // this returns an explorer transaction
+              prevTxId,
+              maxRetries
+            );
             if (prevTx?.outputs && prevTx.outputs[prevOutputIndex]) {
               const output = prevTx.outputs[prevOutputIndex];
-              senderAddress = output.verboseData?.scriptPublicKeyAddress;
+              senderAddress = output.script_public_key_address;
             }
           } catch (error) {
             console.error("Error getting sender address:", error);
           }
         }
+      } else if (
+        isExplorerTransaction(tx) &&
+        tx.inputs &&
+        tx.inputs.length > 0
+      ) {
+        senderAddress = tx.inputs[0].previous_outpoint_address;
       }
 
       // If we still don't have a sender address, use the change output address
       if (!senderAddress && tx.outputs && tx.outputs.length > 1) {
-        senderAddress = tx.outputs[1].verboseData?.scriptPublicKeyAddress;
+        if (isITransaction(tx)) {
+          senderAddress = tx.outputs[1].verboseData?.scriptPublicKeyAddress;
+        } else {
+          senderAddress = tx.outputs[1].script_public_key_address;
+        }
       }
 
       // Get the recipient address from the outputs
       let recipientAddress = null;
       if (tx.outputs && tx.outputs.length > 0) {
-        recipientAddress = tx.outputs[0].verboseData?.scriptPublicKeyAddress;
+        if (isITransaction(tx)) {
+          recipientAddress = tx.outputs[0].verboseData?.scriptPublicKeyAddress;
+        } else {
+          recipientAddress = tx.outputs[0].script_public_key_address;
+        }
+      }
+
+      // If we still don't have a sender address, try to fetch it from the previous transaction
+      if (
+        !senderAddress &&
+        isExplorerTransaction(tx) &&
+        tx.inputs &&
+        tx.inputs.length > 0
+      ) {
+        // Try all inputs to find a valid sender address
+        for (let i = 0; i < tx.inputs.length; i++) {
+          const input = tx.inputs[i];
+          // previous_outpoint_hash
+          const prevTxId = input.previous_outpoint_hash;
+          const prevOutputIndex = parseInt(input.previous_outpoint_index);
+
+          if (prevTxId && !isNaN(prevOutputIndex)) {
+            try {
+              const prevTx = await this._fetchTransactionDetails(
+                prevTxId,
+                maxRetries
+              );
+              if (prevTx?.outputs && prevTx.outputs[prevOutputIndex]) {
+                const output = prevTx.outputs[prevOutputIndex];
+                senderAddress = output.script_public_key_address;
+                break;
+              }
+            } catch (error) {
+              console.error(
+                "Error getting sender address from previous transaction:",
+                error
+              );
+            }
+          }
+        }
       }
 
       // Process the message
-      if (!tx.payload.startsWith(this.MESSAGE_PREFIX_HEX)) {
+      const payload = getTransactionPayload(tx);
+      if (!payload.startsWith(this.MESSAGE_PREFIX_HEX)) {
         return;
       }
 
@@ -1025,8 +1391,10 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
       }
 
       const messageHex = tx.payload.substring(this.MESSAGE_PREFIX_HEX.length);
+
       const handshakePrefix = "313a68616e647368616b653a";
       const commPrefix = "313a636f6d6d3a";
+      const paymentPrefix = "313a7061796d656e743a"; // "1:payment:" in hex
 
       let messageType = "unknown";
       let isHandshake = false;
@@ -1054,6 +1422,25 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
           targetAlias = parts[2];
           encryptedHex = parts[3];
         }
+      } else if (messageHex.startsWith(paymentPrefix)) {
+        messageType = "payment";
+        // For payments, we don't need to parse aliases - just get the encrypted content
+        // New format: 1:payment:{encrypted_payload}
+        const hexToString = (hex: string) => {
+          let str = "";
+          for (let i = 0; i < hex.length; i += 2) {
+            str += String.fromCharCode(parseInt(hex.substr(i, 2), 16));
+          }
+          return str;
+        };
+
+        const messageStr = hexToString(messageHex);
+        const parts = messageStr.split(":");
+
+        if (parts.length >= 3) {
+          // parts[0] = "1", parts[1] = "payment", parts[2] = encrypted_payload
+          encryptedHex = parts[2];
+        }
       }
 
       const isMonitoredAddress =
@@ -1063,6 +1450,13 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
         messageType === "comm" &&
         targetAlias &&
         this.monitoredConversations.has(targetAlias);
+
+      // For payments, check if the sender address is one we're monitoring
+      // (i.e., we have a conversation with them OR they sent us a payment)
+      const isPaymentForUs =
+        messageType === "payment" &&
+        (isMonitoredAddress ||
+          recipientAddress === this.receiveAddress?.toString());
 
       try {
         const privateKeyGenerator = WalletStorage.getPrivateKeyGenerator(
@@ -1075,7 +1469,7 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
 
         try {
           const privateKey = privateKeyGenerator.receiveKey(0);
-          const txId = tx.verboseData?.transactionId;
+          const txId = getTransactionId(tx);
           if (!txId) {
             throw new Error("Transaction ID is missing");
           }
@@ -1091,7 +1485,14 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
             messageType = "handshake";
             isHandshake = true;
             try {
-              const handshakeData = JSON.parse(decryptedContent);
+              // extract the JSON part
+              let jsonContent = decryptedContent;
+              if (decryptedContent.includes("ciph_msg:1:handshake:")) {
+                jsonContent = decryptedContent.split(
+                  "ciph_msg:1:handshake:"
+                )[1];
+              }
+              const handshakeData = JSON.parse(jsonContent);
               if (handshakeData.isResponse) {
                 await this.updateMonitoredConversations();
               }
@@ -1108,7 +1509,7 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
         if (!decryptionSuccess) {
           try {
             const privateKey = privateKeyGenerator.changeKey(0);
-            const txId = tx.verboseData?.transactionId;
+            const txId = getTransactionId(tx);
             if (!txId) {
               throw new Error("Transaction ID is missing");
             }
@@ -1124,7 +1525,14 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
               messageType = "handshake";
               isHandshake = true;
               try {
-                const handshakeData = JSON.parse(decryptedContent);
+                // extract the JSON part
+                let jsonContent = decryptedContent;
+                if (decryptedContent.includes("ciph_msg:1:handshake:")) {
+                  jsonContent = decryptedContent.split(
+                    "ciph_msg:1:handshake:"
+                  )[1];
+                }
+                const handshakeData = JSON.parse(jsonContent);
                 if (handshakeData.isResponse) {
                   await this.updateMonitoredConversations();
                 }
@@ -1139,40 +1547,44 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
           }
         }
 
+        // 🚀 OPTIMIZATION: Mark decryption result in cache
+        if (decryptionSuccess) {
+          DecryptionCache.markSuccess(stringWalletAddress, txId);
+          if (process.env.NODE_ENV === "development") {
+            console.debug(
+              `Real-time: Successful decryption for ${txId} - removed from failed cache if present`
+            );
+          }
+        } else {
+          DecryptionCache.markFailed(stringWalletAddress, txId);
+          if (process.env.NODE_ENV === "development") {
+            console.debug(
+              `Real-time: Failed decryption for ${txId} - marked as failed in cache`
+            );
+          }
+        }
+
         if (
           decryptionSuccess &&
-          (isHandshake || isMonitoredAddress || isCommForUs)
+          (isHandshake || isMonitoredAddress || isCommForUs || isPaymentForUs)
         ) {
-          const txId = tx.verboseData?.transactionId;
-          if (!txId) {
-            throw new Error("Transaction ID is missing");
-          }
           const message: DecodedMessage = {
             transactionId: txId,
             senderAddress: senderAddress || "Unknown",
             recipientAddress: recipientAddress || "Unknown",
             timestamp: blockTime,
             content: decryptedContent,
-            amount: Number(tx.outputs[0].value) / 100000000,
+            amount:
+              Number(
+                isITransaction(tx) ? tx.outputs[0].value : tx.outputs[0].amount
+              ) / 100000000,
             payload: tx.payload,
           };
 
-          this.processedMessageIds.add(txId);
-          if (this.processedMessageIds.size > this.MAX_PROCESSED_MESSAGES) {
-            const oldestId = this.processedMessageIds.values().next().value;
-
-            if (oldestId) {
-              this.processedMessageIds.delete(oldestId);
-            }
-          }
-
-          if (this.receiveAddress) {
-            const messagingStore = useMessagingStore.getState();
-            if (messagingStore) {
-              const myAddress = this.receiveAddress.toString();
-              messagingStore.storeMessage(message, myAddress);
-              messagingStore.loadMessages(myAddress);
-            }
+          const messagingStore = useMessagingStore.getState();
+          if (messagingStore) {
+            messagingStore.storeMessage(message, stringWalletAddress);
+            messagingStore.loadMessages(stringWalletAddress);
           }
 
           if (isHandshake) {
@@ -1186,72 +1598,38 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
       }
     } catch (error) {
       console.error(
-        `Error processing message transaction ${tx.verboseData?.transactionId}:`,
+        `Error processing message transaction ${getTransactionId(tx)}:`,
         error
       );
     }
   }
 
-  private isTransactionForUs(tx: ITransaction): boolean {
+  private isTransactionForUs(tx: ExplorerTransaction): boolean {
     if (!this.receiveAddress) return false;
     const ourAddress = this.receiveAddress.toString();
 
     // Helper function to extract address from output
-    const getOutputAddress = (output: any): string | null => {
-      if (output?.scriptPublicKey?.verboseData?.scriptPublicKeyAddress) {
-        return output.scriptPublicKey.verboseData.scriptPublicKeyAddress;
-      }
-      if (output?.verboseData?.scriptPublicKeyAddress) {
-        return output.verboseData.scriptPublicKeyAddress;
-      }
-      if (output?.scriptPublicKeyAddress) {
-        return output.scriptPublicKeyAddress;
-      }
-      return null;
+    const getOutputAddress = (output: ExplorerOutput): string | null => {
+      // For API transactions, we only need to check script_public_key_address
+      return output?.script_public_key_address || null;
     };
 
     // Check if this is a message transaction
-    const isMessageTx = this.isMessageTransaction(tx);
+    const isMessageTx = this.isMessageOrHandshakeTransaction(tx);
     if (!isMessageTx) return false;
 
-    // For message transactions, check both outputs
-    const messageAmount = BigInt(20000000); // 0.2 KAS
-
-    // Find message output and change output
-    let messageOutput = null;
-    let changeOutput = null;
-
+    // For message transactions, check if any output involves our address
+    // Don't assume specific amounts - handshakes can use any amount
     if (tx.outputs) {
       for (const output of tx.outputs) {
-        const value =
-          typeof output.value === "bigint"
-            ? output.value
-            : BigInt(output.value || 0);
         const address = getOutputAddress(output);
-
-        if (value === messageAmount) {
-          messageOutput = output;
-        } else {
-          changeOutput = output;
+        if (address === ourAddress) {
+          return true; // We're involved if we're either sender or recipient
         }
       }
     }
 
-    // Get addresses from outputs
-    const messageAddress = messageOutput
-      ? getOutputAddress(messageOutput)
-      : null;
-    const changeAddress = changeOutput ? getOutputAddress(changeOutput) : null;
-
-    // We're involved if we're either the recipient (message output)
-    // or the sender (change output)
-    return messageAddress === ourAddress || changeAddress === ourAddress;
-  }
-
-  private stringifyWithBigInt(obj: any): string {
-    return JSON.stringify(obj, (_, value) =>
-      typeof value === "bigint" ? value.toString() : value
-    );
+    return false;
   }
 
   public async sendMessageWithContext(sendMessage: SendMessageWithContextArgs) {
@@ -1340,6 +1718,7 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
           address: destinationAddress,
           amount: minimumAmount,
           payload: payloadHex,
+          priorityFee: sendMessage.priorityFee,
         },
         sendMessage.password
       );
@@ -1374,7 +1753,7 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
     }
   }
 
-  private async processBlockEvent(event: any) {
+  private async processBlockEvent(event: BlockAddedData) {
     try {
       const blockTime =
         Number(event?.data?.block?.header?.timestamp) || Date.now();
@@ -1382,8 +1761,8 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
       const transactions = event?.data?.block?.transactions || [];
 
       // Process transactions silently
-      const txOutputsMap = new Map<string, any[]>();
-      transactions.forEach((tx: any) => {
+      const txOutputsMap = new Map<string, ITransactionOutput[]>();
+      transactions.forEach((tx) => {
         if (tx.outputs && tx.verboseData?.transactionId) {
           txOutputsMap.set(tx.verboseData.transactionId, tx.outputs);
         }
@@ -1395,7 +1774,17 @@ export class AccountService extends EventEmitter<AccountServiceEvents> {
         const txId = tx.verboseData?.transactionId;
         if (!txId || this.processedMessageIds.has(txId)) continue;
 
-        if (this.isMessageTransaction(tx)) {
+        if (this.isMessageOrHandshakeTransaction(tx)) {
+          // mark the txId as processed to avoid duplicate processing
+          this.processedMessageIds.add(txId);
+          if (this.processedMessageIds.size > this.MAX_PROCESSED_MESSAGES) {
+            const oldestId = this.processedMessageIds.values().next().value;
+
+            if (oldestId) {
+              this.processedMessageIds.delete(oldestId);
+            }
+          }
+
           try {
             // Process message transaction silently
             await this.processMessageTransaction(tx, blockHash, blockTime);
@@ -1439,6 +1828,7 @@ export const createWithdrawTransaction = async (
       {
         address: new Address(toAddress),
         amount: amountSompi,
+        priorityFee: { amount: BigInt(0), source: FeeSource.ReceiverPays },
       },
       password
     );
