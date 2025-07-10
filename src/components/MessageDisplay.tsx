@@ -176,21 +176,21 @@ export const MessageDisplay: FC<MessageDisplayProps> = ({
             paymentPayload.message && paymentPayload.message.trim();
 
           return (
-            <div className={clsx("flex items-center gap-1 p-2")}>
+            <div className={clsx("flex items-center gap-1 p-1 sm:p-2")}>
               <div
                 className={clsx(
-                  "mr-2 flex h-18 w-18 animate-pulse items-center justify-center drop-shadow-[0_0_20px_rgba(112,199,186,0.7)]"
+                  "mr-1 flex h-14 w-14 animate-pulse items-center justify-center drop-shadow-[0_0_20px_rgba(112,199,186,0.7)] sm:mr-2 sm:h-18 sm:w-18"
                 )}
               >
                 <KasIcon
-                  className="h-18 w-18 scale-140 drop-shadow-[0_0_15px_rgba(112,199,186,0.8)]"
+                  className="h-14 w-14 scale-110 drop-shadow-[0_0_15px_rgba(112,199,186,0.8)] sm:h-18 sm:w-18 sm:scale-140"
                   circleClassName="fill-white"
                   kClassName="fill-[#70C7BA]"
                 />
               </div>
               <div className="flex-1">
                 {hasMessage && (
-                  <div className="mb-1 text-sm font-medium break-all text-white drop-shadow-sm">
+                  <div className="mb-0.5 text-xs font-medium break-all text-white drop-shadow-sm sm:mb-1 sm:text-sm">
                     {paymentPayload.message}
                   </div>
                 )}
@@ -211,16 +211,16 @@ export const MessageDisplay: FC<MessageDisplayProps> = ({
 
     // Fallback to showing basic payment info
     return (
-      <div className="flex items-center gap-3 p-4">
-        <div className="mr-1 flex h-10 min-w-10 items-center justify-center drop-shadow-[0_0_20px_rgba(112,199,186,0.7)]">
+      <div className="flex items-center gap-2 p-2 sm:gap-3 sm:p-4">
+        <div className="mr-1 flex h-8 min-w-8 items-center justify-center drop-shadow-[0_0_20px_rgba(112,199,186,0.7)] sm:h-10 sm:min-w-10">
           <KasIcon
-            className="h-10 w-10 drop-shadow-[0_0_15px_rgba(112,199,186,0.8)]"
+            className="h-8 w-8 drop-shadow-[0_0_15px_rgba(112,199,186,0.8)] sm:h-10 sm:w-10"
             circleClassName="fill-white"
             kClassName="fill-[#70C7BA]"
           />
         </div>
         <div className="flex-1">
-          <div className="mb-1 text-sm font-medium text-white drop-shadow-sm">
+          <div className="mb-0.5 text-xs font-medium text-white drop-shadow-sm sm:mb-1 sm:text-sm">
             Payment message
           </div>
           <div className="text-xs font-semibold text-white/80 drop-shadow-sm">
@@ -471,28 +471,28 @@ export const MessageDisplay: FC<MessageDisplayProps> = ({
       <div
         onClick={() => setShowMeta((prev) => !prev)}
         className={clsx(
-          "relative z-0 mb-4 max-w-[70%] cursor-pointer px-4 py-3 text-left break-words hyphens-auto",
+          "relative z-0 mb-2 max-w-[70%] cursor-pointer px-2 py-1 text-left break-words hyphens-auto sm:mb-4 sm:px-4 sm:py-3",
           isOutgoing
             ? "rounded-2xl rounded-br-none bg-[#007aff] text-white"
             : "rounded-2xl rounded-bl-none bg-[var(--secondary-bg)]"
         )}
       >
         {(showMeta || showTimestamp) && (
-          <div className="mb-[6px] flex items-center justify-between truncate text-[0.8em]">
+          <div className="mb-1 flex items-center justify-between truncate text-[0.75em] sm:mb-[6px] sm:text-[0.8em]">
             <div className="opacity-70">{displayStamp}</div>
           </div>
         )}
 
-        <div className="my-2 text-[1em] leading-[1.4]">
+        <div className="my-1 text-[0.9em] leading-[1.3] sm:my-2 sm:text-[1em] sm:leading-[1.4]">
           {renderMessageContent()}
         </div>
 
         {showMeta && (
           <div
             className={clsx(
-              "mt-[6px] text-[0.75em] whitespace-nowrap opacity-80",
+              "mt-1 text-[0.7em] whitespace-nowrap opacity-80 sm:mt-[6px] sm:text-[0.75em]",
               isOutgoing
-                ? "flex flex-col items-start space-y-1"
+                ? "flex flex-col items-start space-y-0.5 sm:space-y-1"
                 : "flex flex-col items-start space-x-4 sm:flex-row sm:items-center sm:justify-between"
             )}
           >
