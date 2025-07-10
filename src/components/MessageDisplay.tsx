@@ -475,21 +475,22 @@ export const MessageDisplay: FC<MessageDisplayProps> = ({
             : "rounded-2xl rounded-bl-md bg-[var(--secondary-bg)] text-[var(--text-primary)] shadow-sm"
         )}
       >
-        <div className="my-1 text-[0.9em] leading-[1.3] sm:my-2 sm:text-[1em] sm:leading-[1.4]">
+        <div className="relative my-1 pr-12 text-[0.9em] leading-[1.3] sm:my-2 sm:pr-14 sm:text-[1em] sm:leading-[1.4]">
           {renderMessageContent()}
-          {/* Telegram-style inline timestamp */}
-          <span
-            className={clsx(
-              "float-right clear-both ml-2 text-[0.65em] opacity-70 select-none sm:text-[0.7em]",
-              isOutgoing ? "text-white/80" : "text-[var(--text-secondary)]"
-            )}
-          >
-            {new Date(timestamp).toLocaleTimeString([], {
-              hour: "2-digit",
-              minute: "2-digit",
-            })}
-          </span>
         </div>
+
+        {/* Always positioned timestamp - right corner, same line */}
+        <span
+          className={clsx(
+            "absolute right-2 bottom-2 text-[0.65em] whitespace-nowrap opacity-70 select-none sm:right-3 sm:bottom-3 sm:text-[0.7em]",
+            isOutgoing ? "text-white/80" : "text-[var(--text-secondary)]"
+          )}
+        >
+          {new Date(timestamp).toLocaleTimeString([], {
+            hour: "2-digit",
+            minute: "2-digit",
+          })}
+        </span>
 
         {showMeta && (
           <div
