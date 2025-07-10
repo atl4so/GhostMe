@@ -462,19 +462,17 @@ export const MessageDisplay: FC<MessageDisplayProps> = ({
   return (
     <div
       className={clsx(
-        "mb-1 flex w-full items-end gap-2 sm:mb-2",
-        isOutgoing
-          ? "flex-row-reverse justify-end pr-0.5 sm:pr-2"
-          : "justify-start pl-0.5 sm:pl-2"
+        "mb-1 flex w-full items-end gap-1 px-3 sm:mb-2 sm:gap-2 sm:px-4",
+        isOutgoing ? "justify-end" : "justify-start"
       )}
     >
       <div
         onClick={() => setShowMeta((prev) => !prev)}
         className={clsx(
-          "relative z-0 mb-2 max-w-[70%] cursor-pointer px-2 py-1 text-left break-words hyphens-auto sm:mb-4 sm:px-4 sm:py-3",
+          "relative z-0 mb-2 max-w-[85%] cursor-pointer px-3 py-2 text-left break-words hyphens-auto sm:mb-4 sm:max-w-[70%] sm:px-4 sm:py-3",
           isOutgoing
-            ? "rounded-2xl rounded-br-none bg-[#007aff] text-white"
-            : "rounded-2xl rounded-bl-none bg-[var(--secondary-bg)]"
+            ? "rounded-2xl rounded-br-md bg-[#007aff] text-white shadow-sm"
+            : "rounded-2xl rounded-bl-md bg-[var(--secondary-bg)] text-[var(--text-primary)] shadow-sm"
         )}
       >
         <div className="my-1 text-[0.9em] leading-[1.3] sm:my-2 sm:text-[1em] sm:leading-[1.4]">
@@ -508,8 +506,8 @@ export const MessageDisplay: FC<MessageDisplayProps> = ({
       {/* Always visible timestamp */}
       <div
         className={clsx(
-          "mb-1 self-end text-[0.65em] whitespace-nowrap text-[var(--text-secondary)] sm:text-[0.7em]",
-          isOutgoing ? "mr-1" : "ml-1"
+          "mb-2 self-end text-[0.65em] whitespace-nowrap text-[var(--text-secondary)] sm:mb-3 sm:text-[0.7em]",
+          isOutgoing ? "order-first mr-1" : "order-last ml-1"
         )}
       >
         {new Date(timestamp).toLocaleTimeString([], {
