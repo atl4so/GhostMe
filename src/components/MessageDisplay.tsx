@@ -475,15 +475,12 @@ export const MessageDisplay: FC<MessageDisplayProps> = ({
             : "rounded-2xl rounded-bl-md bg-[var(--secondary-bg)] text-[var(--text-primary)] shadow-sm"
         )}
       >
-        <div className="my-1 pb-4 text-[0.9em] leading-[1.3] sm:my-2 sm:text-[1em] sm:leading-[1.4]">
+        <div className="my-1 text-[0.9em] leading-[1.3] sm:my-2 sm:text-[1em] sm:leading-[1.4]">
           {renderMessageContent()}
-        </div>
-
-        {/* Always visible timestamp - bottom right corner */}
-        <div className="absolute right-2 bottom-1 text-[0.6em] whitespace-nowrap opacity-70 sm:text-[0.65em]">
+          {/* Telegram-style inline timestamp */}
           <span
             className={clsx(
-              "rounded px-1 py-0.5",
+              "float-right clear-both ml-2 text-[0.65em] opacity-70 select-none sm:text-[0.7em]",
               isOutgoing ? "text-white/80" : "text-[var(--text-secondary)]"
             )}
           >
