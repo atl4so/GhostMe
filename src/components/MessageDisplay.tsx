@@ -462,7 +462,7 @@ export const MessageDisplay: FC<MessageDisplayProps> = ({
   return (
     <div
       className={clsx(
-        "mb-1 flex w-full items-end gap-1 px-3 sm:mb-2 sm:gap-2 sm:px-4",
+        "mb-1 flex w-full px-3 sm:mb-2 sm:px-4",
         isOutgoing ? "justify-end" : "justify-start"
       )}
     >
@@ -475,8 +475,23 @@ export const MessageDisplay: FC<MessageDisplayProps> = ({
             : "rounded-2xl rounded-bl-md bg-[var(--secondary-bg)] text-[var(--text-primary)] shadow-sm"
         )}
       >
-        <div className="my-1 text-[0.9em] leading-[1.3] sm:my-2 sm:text-[1em] sm:leading-[1.4]">
+        <div className="my-1 pb-4 text-[0.9em] leading-[1.3] sm:my-2 sm:text-[1em] sm:leading-[1.4]">
           {renderMessageContent()}
+        </div>
+
+        {/* Always visible timestamp - bottom right corner */}
+        <div className="absolute right-2 bottom-1 text-[0.6em] whitespace-nowrap opacity-70 sm:text-[0.65em]">
+          <span
+            className={clsx(
+              "rounded px-1 py-0.5",
+              isOutgoing ? "text-white/80" : "text-[var(--text-secondary)]"
+            )}
+          >
+            {new Date(timestamp).toLocaleTimeString([], {
+              hour: "2-digit",
+              minute: "2-digit",
+            })}
+          </span>
         </div>
 
         {showMeta && (
@@ -501,19 +516,6 @@ export const MessageDisplay: FC<MessageDisplayProps> = ({
             )}
           </div>
         )}
-      </div>
-
-      {/* Always visible timestamp */}
-      <div
-        className={clsx(
-          "mb-2 self-end text-[0.65em] whitespace-nowrap text-[var(--text-secondary)] sm:mb-3 sm:text-[0.7em]",
-          isOutgoing ? "order-first mr-1" : "order-last ml-1"
-        )}
-      >
-        {new Date(timestamp).toLocaleTimeString([], {
-          hour: "2-digit",
-          minute: "2-digit",
-        })}
       </div>
     </div>
   );

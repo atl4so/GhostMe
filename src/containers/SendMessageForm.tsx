@@ -258,12 +258,17 @@ export const SendMessageForm: FC<SendMessageFormProps> = ({ onExpand }) => {
       messageStore.storeMessage(newMessageData, recipient);
       messageStore.addMessages([newMessageData]);
 
-      // Only reset the message input, keep the recipient
-      if (messageInputRef.current) messageInputRef.current.value = "";
-      setMessage("");
+      // Only reset the message input, keep the recipient and focus
       if (messageInputRef.current) {
-        messageInputRef.current.style.height = "";
+        messageInputRef.current.value = "";
+        // Keep the keyboard open by focusing the input again
+        setTimeout(() => {
+          if (messageInputRef.current) {
+            messageInputRef.current.focus();
+          }
+        }, 100);
       }
+      setMessage("");
       setFeeEstimate(null);
 
       // Keep the conversation open with the same recipient
@@ -326,7 +331,7 @@ export const SendMessageForm: FC<SendMessageFormProps> = ({ onExpand }) => {
   };
 
   return (
-    <div className="relative flex-col gap-8">
+    <div className="sticky bottom-0 z-10 flex-col gap-8 bg-[var(--primary-bg)] pt-4 pb-2 sm:pb-4">
       {/* Chevron expand/collapse that sorta sits above the textarea */}
       <div className="absolute -top-4 left-1/2 z-10 hidden -translate-x-1/2 sm:block">
         {!isExpanded ? (
@@ -385,12 +390,12 @@ export const SendMessageForm: FC<SendMessageFormProps> = ({ onExpand }) => {
           />
         </div>
       )}
-      <div className="flex items-center gap-1 rounded-lg border border-[var(--border-color)] bg-[var(--primary-bg)] p-0.5 sm:gap-2 sm:p-1">
+      <div className="flex items-center gap-1 rounded-lg border border-[var(--border-color)] bg-[var(--primary-bg)] p-2 sm:gap-2 sm:p-3">
         <Textarea
           ref={messageInputRef}
-          rows={isExpanded ? 6 : 1}
+          rows={isExpanded ? 6 : 2}
           placeholder="Type your message..."
-          className="peer flex-1 resize-none overflow-y-auto border-none bg-transparent p-1 text-[0.85em] text-[var(--text-primary)] outline-none sm:p-2 sm:text-[0.9em]"
+          className="peer flex-1 resize-none overflow-y-auto border-none bg-transparent p-2 text-[0.9em] text-[var(--text-primary)] outline-none sm:p-3 sm:text-[1em]"
           value={message}
           onChange={(e) => setMessage(e.currentTarget.value)}
           onInput={(e) => {
@@ -406,12 +411,14 @@ export const SendMessageForm: FC<SendMessageFormProps> = ({ onExpand }) => {
             if (e.key === "Enter" && !e.shiftKey) {
               e.preventDefault();
               onSendClicked();
+              // Prevent any blur event that might close the keyboard
+              e.currentTarget.focus();
             }
           }}
           autoComplete="off"
           spellCheck="false"
           data-form-type="other"
-          style={isExpanded ? { height: "144px" } : {}}
+          style={isExpanded ? { height: "144px" } : { minHeight: "48px" }}
         />
 
         <input
@@ -460,7 +467,14 @@ export const SendMessageForm: FC<SendMessageFormProps> = ({ onExpand }) => {
         </Popover>
 
         <button
-          onClick={onSendClicked}
+          onClick={(e) => {
+            e.preventDefault();
+            onSendClicked();
+            // Keep focus on the input to prevent keyboard from closing
+            if (messageInputRef.current) {
+              messageInputRef.current.focus();
+            }
+          }}
           className={clsx(
             "text-kas-primary hover:text-kas-secondary transition-width flex items-center justify-center overflow-hidden duration-200 ease-out",
             message.length > 0
