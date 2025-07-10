@@ -287,13 +287,52 @@ export const MessageSection: FC<{
                   ? idx === lastOutgoing
                   : idx === lastIncoming;
 
+                // Check if we need to show a date separator
+                const prevMsg =
+                  idx > 0
+                    ? messageStore.messagesOnOpenedRecipient[idx - 1]
+                    : null;
+                const currentDate = new Date(msg.timestamp).toDateString();
+                const prevDate = prevMsg
+                  ? new Date(prevMsg.timestamp).toDateString()
+                  : null;
+                const showDateSeparator = !prevMsg || currentDate !== prevDate;
+
                 return (
-                  <MessageDisplay
-                    key={msg.transactionId}
-                    isOutgoing={isOutgoing}
-                    showTimestamp={showTimestamp}
-                    message={msg}
-                  />
+                  <div key={msg.transactionId}>
+                    {/* Date separator */}
+                    {showDateSeparator && (
+                      <div className="my-4 flex justify-center sm:my-6">
+                        <div className="rounded-full border border-[var(--border-color)] bg-[var(--secondary-bg)] px-3 py-1 text-xs text-[var(--text-secondary)] sm:text-sm">
+                          {(() => {
+                            const msgDate = new Date(msg.timestamp);
+                            const today = new Date();
+                            const yesterday = new Date(today);
+                            yesterday.setDate(yesterday.getDate() - 1);
+
+                            if (
+                              msgDate.toDateString() === today.toDateString()
+                            ) {
+                              return "Today";
+                            } else if (
+                              msgDate.toDateString() ===
+                              yesterday.toDateString()
+                            ) {
+                              return "Yesterday";
+                            } else {
+                              return msgDate.toLocaleDateString();
+                            }
+                          })()}
+                        </div>
+                      </div>
+                    )}
+
+                    <MessageDisplay
+                      isOutgoing={isOutgoing}
+                      showTimestamp={showTimestamp}
+                      message={msg}
+                    />
+                  </div>
                 );
               })
             ) : (
