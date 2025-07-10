@@ -255,7 +255,7 @@ export const MessageSection: FC<{
       {boxState === "filtered" && (
         /* A CONVERSATION IS OPEN */
         <>
-          <div className="flex h-[60px] items-center justify-between border-b border-[var(--border-color)] bg-[var(--secondary-bg)] p-4">
+          <div className="flex h-[50px] items-center justify-between border-b border-[var(--border-color)] bg-[var(--secondary-bg)] p-2 sm:h-[60px] sm:p-4">
             {/* mobile back button */}
             <button
               onClick={() => setMobileView("contacts")}
@@ -277,7 +277,7 @@ export const MessageSection: FC<{
           </div>
 
           <div
-            className="flex-1 overflow-x-hidden overflow-y-auto bg-[var(--primary-bg)] bg-[linear-gradient(rgba(255,255,255,0.03)_1px,transparent_1px),linear-gradient(90deg,rgba(255,255,255,0.03)_1px,transparent_1px)] bg-[length:20px_20px] p-4"
+            className="flex-1 overflow-x-hidden overflow-y-auto bg-[var(--primary-bg)] bg-[linear-gradient(rgba(255,255,255,0.03)_1px,transparent_1px),linear-gradient(90deg,rgba(255,255,255,0.03)_1px,transparent_1px)] bg-[length:20px_20px] p-2 sm:p-4"
             ref={messagesScrollRef}
           >
             {messageStore.messagesOnOpenedRecipient.length ? (

@@ -9,6 +9,7 @@ import {
   XCircleIcon,
 } from "@heroicons/react/24/solid";
 import clsx from "clsx";
+import { useIsMobile } from "../utils/useIsMobile";
 
 export const ContactCard: FC<{
   contact: Contact;
@@ -21,6 +22,7 @@ export const ContactCard: FC<{
   const messagingStore = useMessagingStore();
   const [showNewMsgAlert, setNewMsgAlert] = useState(false);
   const prevMessageId = useRef<string | undefined>(undefined);
+  const isMobile = useIsMobile();
 
   // Use the store selector to get the latest message for this contact
   const lastMessage = useMessagingStore((s) =>
@@ -247,28 +249,95 @@ export const ContactCard: FC<{
           style={{ zIndex: 1 }}
         />
       )}
-      {/* Avatar section for expanded view */}
-      <div className="mb-2 flex items-center gap-3">
-        <div className="relative">
-          {contact.avatar && contact.avatarType === "uploaded" ? (
-            <img
-              src={contact.avatar}
-              alt={displayName}
-              className="h-10 w-10 rounded-full border border-[var(--border-color)] object-cover"
-            />
-          ) : contact.avatarType === "letter" && contact.nickname?.trim() ? (
-            <div className="bg-kas-primary flex h-10 w-10 items-center justify-center rounded-full text-sm font-bold text-white">
-              {contact.nickname.trim().charAt(0).toUpperCase()}
-            </div>
-          ) : (
-            <AvatarHash
-              address={contact.address}
-              size={40}
-              selected={isSelected}
-            />
-          )}
+      {/* Avatar section for expanded view - hidden on mobile */}
+      {!isMobile && (
+        <div className="mb-2 flex items-center gap-3">
+          <div className="relative">
+            {contact.avatar && contact.avatarType === "uploaded" ? (
+              <img
+                src={contact.avatar}
+                alt={displayName}
+                className="h-10 w-10 rounded-full border border-[var(--border-color)] object-cover"
+              />
+            ) : contact.avatarType === "letter" && contact.nickname?.trim() ? (
+              <div className="bg-kas-primary flex h-10 w-10 items-center justify-center rounded-full text-sm font-bold text-white">
+                {contact.nickname.trim().charAt(0).toUpperCase()}
+              </div>
+            ) : (
+              <AvatarHash
+                address={contact.address}
+                size={40}
+                selected={isSelected}
+              />
+            )}
+          </div>
+          <div className="flex-1 text-base font-semibold">
+            {isEditingNickname ? (
+              <div className="flex w-full flex-col md:flex-row md:items-center md:gap-2">
+                <input
+                  type="text"
+                  value={tempNickname}
+                  onChange={(e) => setTempNickname(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") handleNicknameSave();
+                    if (e.key === "Escape") handleNicknameCancel();
+                  }}
+                  autoFocus
+                  placeholder={contact?.address}
+                  className="h-5 flex-1 rounded-sm text-xs leading-none"
+                />
+                <div className="mt-2 flex w-full justify-between gap-2 md:mt-0 md:w-auto md:justify-start">
+                  <button
+                    onClick={handleNicknameSave}
+                    className="flex w-full cursor-pointer items-center justify-center rounded-sm bg-green-500 p-0.5 hover:bg-gray-600 md:w-fit"
+                  >
+                    <CheckCircleIcon className="h-5 w-5 fill-current text-gray-300" />
+                  </button>
+                  <button
+                    onClick={handleNicknameCancel}
+                    className="flex w-full cursor-pointer items-center justify-center rounded-sm bg-red-500 p-0.5 text-white hover:bg-gray-600 md:w-fit"
+                  >
+                    <XCircleIcon className="h-5 w-5 fill-current text-gray-300" />
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="flex w-full items-center justify-between gap-1">
+                <span
+                  className={clsx(
+                    "max-w-full cursor-pointer truncate break-all text-[var(--text-primary)] group-data-checked:text-[var(--color-kas-secondary)]",
+                    {
+                      "cursor-help": contact.nickname?.trim(),
+                      "cursor-default": !contact.nickname?.trim(),
+                    }
+                  )}
+                  title={
+                    contact.nickname?.trim()
+                      ? `Address: ${shortAddress}`
+                      : undefined
+                  }
+                >
+                  {displayName}
+                </span>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setIsEditingNickname(true);
+                  }}
+                  title="Edit nickname"
+                  className="cursor-pointer border-0 bg-transparent text-xs opacity-60 hover:opacity-100"
+                >
+                  <PencilIcon className="h-5 w-5 md:h-4 md:w-4" />
+                </button>
+              </div>
+            )}
+          </div>
         </div>
-        <div className="flex-1 text-base font-semibold">
+      )}
+
+      {/* Mobile version without avatar */}
+      {isMobile && (
+        <div className="mb-2 text-base font-semibold">
           {isEditingNickname ? (
             <div className="flex w-full flex-col md:flex-row md:items-center md:gap-2">
               <input
@@ -329,7 +398,8 @@ export const ContactCard: FC<{
             </div>
           )}
         </div>
-      </div>
+      )}
+
       <div className="relative overflow-hidden text-sm text-ellipsis whitespace-nowrap text-[var(--text-secondary)]">
         <span
           className={clsx(

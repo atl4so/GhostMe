@@ -4,9 +4,6 @@ import { useNetworkStore } from "./store/network.store";
 import { NetworkType } from "./types/all";
 import { Button } from "./components/Common/Button";
 import { useNavigate } from "react-router";
-import { ProfileSettings } from "./components/ProfileSettings";
-import { useWalletStore } from "./store/wallet.store";
-import { useMessagingStore } from "./store/messaging.store";
 
 export const SettingsPage: React.FC = () => {
   const networkStore = useNetworkStore();
@@ -15,36 +12,6 @@ export const SettingsPage: React.FC = () => {
   const isConnecting = useNetworkStore((state) => state.isConnecting);
   const connect = useNetworkStore((state) => state.connect);
   const navigate = useNavigate();
-
-  // Profile settings
-  const walletStore = useWalletStore();
-  const messagingStore = useMessagingStore();
-  const walletAddress = walletStore.address?.toString();
-
-  // Get current user's contact info for profile editing
-  const currentContact = messagingStore.contacts.find(
-    (c) => c.address === walletAddress
-  );
-
-  const handleProfileSave = (data: {
-    nickname?: string;
-    avatar?: string;
-    avatarType?: "generated" | "uploaded" | "letter";
-  }) => {
-    if (!walletAddress) return;
-
-    if (data.nickname !== undefined) {
-      messagingStore.setContactNickname(walletAddress, data.nickname);
-    }
-
-    if (data.avatar !== undefined || data.avatarType) {
-      messagingStore.setContactAvatar(
-        walletAddress,
-        data.avatar,
-        data.avatarType || "generated"
-      );
-    }
-  };
 
   const connectionError = useNetworkStore((s) => s.connectionError);
   const [connectionSuccess, setConnectionSuccess] = useState(false);
@@ -99,22 +66,8 @@ export const SettingsPage: React.FC = () => {
   return (
     <div className="app">
       <div className="bg-[var(--primary-bg)] px-1 py-4 sm:px-8">
-        <div className="flex flex-col items-center gap-8">
-          {/* Profile Settings Section */}
-          {walletAddress && (
-            <div className="w-full max-w-[600px]">
-              <ProfileSettings
-                address={walletAddress}
-                nickname={currentContact?.nickname}
-                avatar={currentContact?.avatar}
-                avatarType={currentContact?.avatarType}
-                onSave={handleProfileSave}
-              />
-            </div>
-          )}
-
-          {/* Network Settings Section */}
-          <div className="relative w-full max-w-[600px] rounded-lg border border-[var(--border-color)] bg-[var(--secondary-bg)] p-8">
+        <div className="flex items-center gap-4">
+          <div className="relative mx-auto my-8 max-w-[600px] rounded-lg border border-[var(--border-color)] bg-[var(--secondary-bg)] p-8">
             <div className="mb-1 flex grow items-center justify-center">
               <NetworkSelector
                 selectedNetwork={selectedNetwork}
@@ -124,7 +77,7 @@ export const SettingsPage: React.FC = () => {
             </div>
 
             <h2 className="my-8 text-center text-[1.5rem] font-semibold text-[var(--text-primary)]">
-              Network Settings
+              Settings
             </h2>
 
             <label htmlFor="node-url" className="mb-4 block">

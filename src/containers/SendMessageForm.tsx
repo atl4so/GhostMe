@@ -385,12 +385,12 @@ export const SendMessageForm: FC<SendMessageFormProps> = ({ onExpand }) => {
           />
         </div>
       )}
-      <div className="flex items-center gap-2 rounded-lg border border-[var(--border-color)] bg-[var(--primary-bg)] p-1">
+      <div className="flex items-center gap-1 rounded-lg border border-[var(--border-color)] bg-[var(--primary-bg)] p-0.5 sm:gap-2 sm:p-1">
         <Textarea
           ref={messageInputRef}
           rows={isExpanded ? 6 : 1}
           placeholder="Type your message..."
-          className="peer flex-1 resize-none overflow-y-auto border-none bg-transparent p-2 text-[0.9em] text-[var(--text-primary)] outline-none"
+          className="peer flex-1 resize-none overflow-y-auto border-none bg-transparent p-1 text-[0.85em] text-[var(--text-primary)] outline-none sm:p-2 sm:text-[0.9em]"
           value={message}
           onChange={(e) => setMessage(e.currentTarget.value)}
           onInput={(e) => {
@@ -424,8 +424,8 @@ export const SendMessageForm: FC<SendMessageFormProps> = ({ onExpand }) => {
         <Popover className="relative">
           {({ close }) => (
             <>
-              <PopoverButton className="peer rounded p-2 hover:bg-white/5">
-                <PlusIcon className="size-5" />
+              <PopoverButton className="peer rounded p-1 hover:bg-white/5 sm:p-2">
+                <PlusIcon className="size-4 sm:size-5" />
               </PopoverButton>
               <Transition
                 enter="transition ease-out duration-100"
@@ -463,11 +463,13 @@ export const SendMessageForm: FC<SendMessageFormProps> = ({ onExpand }) => {
           onClick={onSendClicked}
           className={clsx(
             "text-kas-primary hover:text-kas-secondary transition-width flex items-center justify-center overflow-hidden duration-200 ease-out",
-            message.length > 0 ? "mr-2 w-6 cursor-pointer" : "w-0"
+            message.length > 0
+              ? "mr-1 w-5 cursor-pointer sm:mr-2 sm:w-6"
+              : "w-0"
           )}
           aria-label="Send"
         >
-          <PaperAirplaneIcon className="h-6 w-6" />
+          <PaperAirplaneIcon className="h-5 w-5 sm:h-6 sm:w-6" />
         </button>
       </div>
 
