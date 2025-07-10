@@ -192,6 +192,12 @@ export const ContactCard: FC<{
           {isSelected && (
             <div className="ring-kas-secondary pointer-events-none absolute inset-0 rounded-full ring-2" />
           )}
+          {/* New message indicator for collapsed mode */}
+          {showNewMsgAlert && (
+            <div className="bg-kas-secondary absolute -top-1 -right-1 flex h-3 w-3 animate-pulse items-center justify-center rounded-full text-xs text-white">
+              <div className="h-1.5 w-1.5 rounded-full bg-white"></div>
+            </div>
+          )}
         </div>
       </div>
     );
@@ -279,7 +285,7 @@ export const ContactCard: FC<{
           </div>
         )}
       </div>
-      <div className="overflow-hidden text-sm text-ellipsis whitespace-nowrap text-[var(--text-secondary)]">
+      <div className="relative overflow-hidden text-sm text-ellipsis whitespace-nowrap text-[var(--text-secondary)]">
         <span
           className={clsx(
             "relative transition-colors duration-300",
@@ -288,6 +294,12 @@ export const ContactCard: FC<{
         >
           {preview}
         </span>
+        {/* New message indicator */}
+        {showNewMsgAlert && (
+          <span className="bg-kas-secondary absolute top-0 right-0 animate-pulse rounded-full px-1.5 py-0.5 text-xs font-semibold text-white">
+            New
+          </span>
+        )}
       </div>
       <div className="mt-1 text-xs text-[var(--text-secondary)]">
         {timestamp}
