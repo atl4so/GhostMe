@@ -18,13 +18,15 @@ export type Message = {
   };
 };
 
-export type Contact = {
+export interface Contact {
   address: string;
+  nickname?: string;
+  avatar?: string; // Base64 encoded image data
+  avatarType?: "generated" | "uploaded" | "letter";
   lastMessage: Message;
   messages: Message[];
   status?: "active" | "pending" | "rejected";
-  nickname?: string;
-};
+}
 
 export type NetworkType = "mainnet" | "testnet-10" | "testnet-11" | "devnet";
 

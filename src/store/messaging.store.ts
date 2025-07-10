@@ -88,6 +88,15 @@ interface MessagingState {
   // Nickname management
   setContactNickname: (address: string, nickname: string) => void;
   removeContactNickname: (address: string) => void;
+
+  // Avatar management
+  setContactAvatar: (
+    address: string,
+    avatar: string | undefined,
+    avatarType: "generated" | "uploaded" | "letter"
+  ) => void;
+  removeContactAvatar: (address: string) => void;
+
   getLastMessageForContact: (contactAddress: string) => Message | null;
 }
 
@@ -280,11 +289,19 @@ export const useMessagingStore = create<MessagingState>((set, g) => ({
     const storageKey = `contact_nicknames_${address}`;
     const savedNicknames = JSON.parse(localStorage.getItem(storageKey) || "{}");
 
+    // Load saved avatars
+    const avatarStorageKey = `contact_avatars_${address}`;
+    const savedAvatars = JSON.parse(
+      localStorage.getItem(avatarStorageKey) || "{}"
+    );
+
     // Update state with sorted contacts and messages
     const sortedContacts = [...contacts.values()]
       .map((contact) => ({
         ...contact,
         nickname: savedNicknames[contact.address] || undefined,
+        avatar: savedAvatars[contact.address]?.avatar || undefined,
+        avatarType: savedAvatars[contact.address]?.avatarType || "generated",
       }))
       .sort((a, b) => b.lastMessage.timestamp - a.lastMessage.timestamp);
 
@@ -1036,6 +1053,43 @@ export const useMessagingStore = create<MessagingState>((set, g) => ({
 
   removeContactNickname: (address: string) => {
     g().setContactNickname(address, "");
+  },
+
+  // Avatar management functions
+  setContactAvatar: (
+    address: string,
+    avatar: string | undefined,
+    avatarType: "generated" | "uploaded" | "letter"
+  ) => {
+    const contacts = g().contacts;
+    const contactIndex = contacts.findIndex((c) => c.address === address);
+
+    if (contactIndex !== -1) {
+      const updatedContacts = [...contacts];
+      updatedContacts[contactIndex] = {
+        ...updatedContacts[contactIndex],
+        avatar: avatar,
+        avatarType: avatarType,
+      };
+      set({ contacts: updatedContacts });
+
+      // Save to localStorage
+      const walletStore = useWalletStore.getState();
+      if (walletStore.address) {
+        const storageKey = `contact_avatars_${walletStore.address.toString()}`;
+        const avatars = JSON.parse(localStorage.getItem(storageKey) || "{}");
+        if (avatar) {
+          avatars[address] = { avatar, avatarType };
+        } else {
+          delete avatars[address];
+        }
+        localStorage.setItem(storageKey, JSON.stringify(avatars));
+      }
+    }
+  },
+
+  removeContactAvatar: (address: string) => {
+    g().setContactAvatar(address, undefined, "generated");
   },
   getLastMessageForContact: (contactAddress: string) => {
     const messages = g().messages;
