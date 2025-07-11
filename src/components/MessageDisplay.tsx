@@ -462,14 +462,14 @@ export const MessageDisplay: FC<MessageDisplayProps> = ({
   return (
     <div
       className={clsx(
-        "mb-1 flex w-full px-3 sm:mb-2 sm:px-4",
+        "mb-0.5 flex w-full px-3 sm:mb-1 sm:px-4",
         isOutgoing ? "justify-end" : "justify-start"
       )}
     >
       <div
         onClick={() => setShowMeta((prev) => !prev)}
         className={clsx(
-          "relative z-0 mb-2 max-w-[85%] cursor-pointer px-3 py-2 text-left break-words hyphens-auto sm:mb-4 sm:max-w-[70%] sm:px-4 sm:py-3",
+          "relative z-0 mb-0 max-w-[85%] cursor-pointer px-3 py-2 text-left break-words hyphens-auto sm:mb-0 sm:max-w-[70%] sm:px-4 sm:py-3",
           isOutgoing
             ? "rounded-2xl rounded-br-md bg-[#007aff] text-white shadow-sm"
             : "rounded-2xl rounded-bl-md bg-[var(--secondary-bg)] text-[var(--text-primary)] shadow-sm"
