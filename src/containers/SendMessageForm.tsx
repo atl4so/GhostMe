@@ -390,12 +390,12 @@ export const SendMessageForm: FC<SendMessageFormProps> = ({ onExpand }) => {
           />
         </div>
       )}
-      <div className="flex items-center gap-1 rounded-lg border border-[var(--border-color)] bg-[var(--primary-bg)] p-2 sm:gap-2 sm:p-3">
+      <div className="flex items-center gap-1 rounded-lg border border-[var(--border-color)] bg-[var(--primary-bg)] p-0.5 sm:gap-2 sm:p-1">
         <Textarea
           ref={messageInputRef}
-          rows={isExpanded ? 6 : 2}
+          rows={isExpanded ? 6 : 1}
           placeholder="Type your message..."
-          className="peer flex-1 resize-none overflow-y-auto border-none bg-transparent p-2 text-[0.9em] text-[var(--text-primary)] outline-none sm:p-3 sm:text-[1em]"
+          className="peer flex-1 resize-none overflow-y-auto border-none bg-transparent p-1 text-[0.85em] text-[var(--text-primary)] outline-none sm:p-2 sm:text-[0.9em]"
           value={message}
           onChange={(e) => setMessage(e.currentTarget.value)}
           onInput={(e) => {
@@ -418,7 +418,7 @@ export const SendMessageForm: FC<SendMessageFormProps> = ({ onExpand }) => {
           autoComplete="off"
           spellCheck="false"
           data-form-type="other"
-          style={isExpanded ? { height: "144px" } : { minHeight: "48px" }}
+          style={isExpanded ? { height: "144px" } : {}}
         />
 
         <input
