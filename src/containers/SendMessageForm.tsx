@@ -390,12 +390,12 @@ export const SendMessageForm: FC<SendMessageFormProps> = ({ onExpand }) => {
           />
         </div>
       )}
-      <div className="flex items-center gap-1 rounded-lg border border-[var(--border-color)] bg-[var(--primary-bg)] p-0.5 sm:gap-2 sm:p-1">
+      <div className="flex items-center gap-1 rounded-lg border border-[var(--border-color)] bg-[var(--primary-bg)] p-1 sm:gap-2 sm:p-1.5">
         <Textarea
           ref={messageInputRef}
           rows={isExpanded ? 6 : 1}
           placeholder="Type your message..."
-          className="peer flex-1 resize-none overflow-y-auto border-none bg-transparent p-1 text-[0.85em] text-[var(--text-primary)] outline-none sm:p-2 sm:text-[0.9em]"
+          className="peer flex-1 resize-none overflow-y-auto border-none bg-transparent p-1.5 text-[0.9em] text-[var(--text-primary)] outline-none sm:p-2 sm:text-[0.95em]"
           value={message}
           onChange={(e) => setMessage(e.currentTarget.value)}
           onInput={(e) => {
@@ -405,14 +405,6 @@ export const SendMessageForm: FC<SendMessageFormProps> = ({ onExpand }) => {
               t.style.height = `${Math.min(t.scrollHeight, 144)}px`;
             } else {
               t.style.height = "144px";
-            }
-          }}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault();
-              onSendClicked();
-              // Prevent any blur event that might close the keyboard
-              e.currentTarget.focus();
             }
           }}
           autoComplete="off"
@@ -483,7 +475,7 @@ export const SendMessageForm: FC<SendMessageFormProps> = ({ onExpand }) => {
           )}
           aria-label="Send"
         >
-          <PaperAirplaneIcon className="h-5 w-5 sm:h-6 sm:w-6" />
+          <PaperAirplaneIcon className="h-6 w-6 sm:h-7 sm:w-7" />
         </button>
       </div>
 
