@@ -475,7 +475,7 @@ export const MessageDisplay: FC<MessageDisplayProps> = ({
             : "rounded-2xl rounded-bl-md bg-[var(--secondary-bg)] text-[var(--text-primary)] shadow-sm"
         )}
       >
-        <div className="my-1 text-[0.9em] leading-[1.3] sm:my-2 sm:text-[1em] sm:leading-[1.4]">
+        <div className="my-1 text-[0.9em] leading-[1.3] whitespace-pre-wrap sm:my-2 sm:text-[1em] sm:leading-[1.4]">
           <span>{renderMessageContent()}</span>
           {/* Timestamp flows right after text with minimal gap */}
           <span
