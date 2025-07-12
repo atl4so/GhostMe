@@ -1,26 +1,25 @@
-import { FC, useCallback, useEffect, useState, useRef } from "react";
-import { unknownErrorToErrorLike } from "./utils/errors";
-import { Contact } from "./types/all";
-import { useMessagingStore } from "./store/messaging.store";
-import { ErrorCard } from "./components/ErrorCard";
-import { useWalletStore } from "./store/wallet.store";
-import { NewChatForm } from "./components/NewChatForm";
-import { MessageSection } from "./containers/MessagesSection";
 import { ArrowPathIcon } from "@heroicons/react/24/solid";
-import { useNetworkStore } from "./store/network.store";
-import { ContactSection } from "./containers/ContactSection";
-import { useIsMobile } from "./utils/useIsMobile";
-import { useModals } from "./context/ModalContext";
-import { Modal } from "./components/Common/modal";
-import { WalletAddressSection } from "./components/Modals/WalletAddressSection";
-import { WalletWithdrawal } from "./components/Modals/WalletWithdrawal";
-import { WalletSeedRetreiveDisplay } from "./components/Modals/WalletSeedRetreiveDisplay";
-import { MessageBackup } from "./components/Modals/MessageBackup";
-import { WalletInfo } from "./components/Modals/WalletInfo";
-import { UtxoCompound } from "./components/Modals/UtxoCompound";
-import { useUiStore } from "./store/ui.store";
+import { FC, useState, useEffect, useCallback } from "react";
+import { Modal } from "../components/Common/modal";
+import { ErrorCard } from "../components/ErrorCard";
+import { MessageBackup } from "../components/Modals/MessageBackup";
+import { UtxoCompound } from "../components/Modals/UtxoCompound";
+import { WalletAddressSection } from "../components/Modals/WalletAddressSection";
+import { WalletInfo } from "../components/Modals/WalletInfo";
+import { WalletSeedRetreiveDisplay } from "../components/Modals/WalletSeedRetreiveDisplay";
+import { WalletWithdrawal } from "../components/Modals/WalletWithdrawal";
+import { NewChatForm } from "../components/NewChatForm";
+import { useMessagingStore } from "../store/messaging.store";
+import { useNetworkStore } from "../store/network.store";
+import { useUiStore } from "../store/ui.store";
+import { useWalletStore } from "../store/wallet.store";
+import { Contact } from "../types/all";
+import { unknownErrorToErrorLike } from "../utils/errors";
+import { useIsMobile } from "../utils/useIsMobile";
+import { ContactSection } from "./ContactSection";
+import { MessageSection } from "./MessagesSection";
 
-export const OneLiner: FC = () => {
+export const MessengerContainer: FC = () => {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isWalletReady, setIsWalletReady] = useState(false);
   const uiStore = useUiStore();
@@ -36,7 +35,7 @@ export const OneLiner: FC = () => {
   const walletStore = useWalletStore();
 
   const isMobile = useIsMobile();
-  const { isOpen, closeModal, closeAllModals } = useModals();
+  const { isOpen, closeModal, closeAllModals } = useUiStore();
 
   useEffect(() => {
     if (walletStore.unlockedWallet) setIsWalletReady(true);
@@ -61,7 +60,7 @@ export const OneLiner: FC = () => {
   // Clean up useEffect
   useEffect(() => {
     return () => {
-      // Called when OneLiner unmounts (user leaves route), so we can reset all the states
+      // Called when MessagingContainer unmounts (user leaves route), so we can reset all the states
       walletStore.lock();
       uiStore.setSettingsOpen(false);
       closeAllModals();
