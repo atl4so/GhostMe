@@ -1,0 +1,16 @@
+[build]
+  publish = "dist"
+  command = "npm run build:netlify"
+
+[build.environment]
+  NODE_VERSION = "20.9.0"
+  NPM_VERSION = "10.1.0"
+
+[context.production]
+  command = "npm run build:netlify"
+
+[context.staging]
+  command = "npm run build:netlify"
+
+[context.deploy-preview]
+  command = "npm run build:netlify"

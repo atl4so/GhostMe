@@ -7,6 +7,7 @@
     "dev": "vite",
     "build:production": "tsc -b && vite build ",
     "build:staging": "tsc -b && vite build --mode staging",
+    "build:netlify": "npm run wasm:setup && npm run build:production",
     "lint": "eslint .",
     "format": "prettier --check .",
     "format:fix": "prettier --write ./src",
@@ -15,6 +16,7 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "wasm:build": "cd cipher && wasm-pack build --target web --release -d ../cipher-wasm && cd ..",
+    "wasm:setup": "curl -L -o kaspa-wasm32-sdk.zip https://github.com/kaspanet/rusty-kaspa/releases/download/v1.0.0/kaspa-wasm32-sdk-v1.0.0.zip && unzip -o kaspa-wasm32-sdk.zip && cp -r kaspa-wasm32-sdk/* wasm/ && rm -rf kaspa-wasm32-sdk kaspa-wasm32-sdk.zip && echo 'WASM files downloaded and extracted'",
     "prepare": "node .husky/install.mjs"
   },
   "dependencies": {
