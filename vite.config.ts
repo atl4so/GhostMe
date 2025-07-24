@@ -37,6 +37,13 @@ export default defineConfig({
       },
     }),
   ],
+  resolve: {
+    alias: {
+      "kaspa-wasm": "./wasm/web/kaspa/kaspa.js",
+      "wasm/kaspa": "./wasm/web/kaspa/kaspa.js",
+      cipher: "./cipher-wasm/cipher.js",
+    },
+  },
   server: {
     port: 3000,
     host: "0.0.0.0",

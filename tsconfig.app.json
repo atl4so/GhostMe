@@ -25,7 +25,8 @@
     /* Path Mappings */
     "baseUrl": ".",
     "paths": {
-      "kaspa-wasm": ["./wasm"],
+      "kaspa-wasm": ["./wasm/web/kaspa"],
+      "wasm/kaspa": ["./wasm/web/kaspa"],
       "cipher": ["./cipher-wasm"]
     }
   },
